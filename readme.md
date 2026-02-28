@@ -1,5 +1,7 @@
 # Strange Caves
 
+Made with [ct.js](https://ctjs.rocks/).
+
 Strange Caves is a procedural exploration game originally created for the [**2026.1 Brackeys Game Jam (Brackeys 15)**](https://itch.io/jam/brackeys-15).
 
 The initial jam version was developed in a week and published on itch.io as a small experimental prototype.
