@@ -1,0 +1,4440 @@
+ctjsVersion: 5.2.1
+backups: 3
+language: typescript
+notes: /* empty */
+libs:
+  place:
+    gridX: 1024
+    gridY: 1024
+    debugMode: false
+    debugText: 0
+  pointer:
+    startlocked: false
+  keyboard: {}
+  keyboard.polyfill: {}
+  pointer.polyfill: {}
+  noise: {}
+  random: {}
+  gamepad: {}
+  vkeys: {}
+  matter:
+    matterUseStaticDeltaTime: true
+  tween: {}
+startroom: L23W53H5w6nDPn
+contentTypes: []
+actions:
+  - name: MoveX
+    methods:
+      - code: keyboard.KeyD
+      - code: keyboard.KeyA
+        multiplier: -1
+      - code: keyboard.ArrowRight
+      - code: keyboard.ArrowLeft
+        multiplier: -1
+      - code: gamepad.Right
+      - code: gamepad.Left
+        multiplier: -1
+      - code: gamepad.LStickX
+      - code: vkeys.Vjoy1X
+  - name: MoveY
+    methods:
+      - code: keyboard.KeyW
+        multiplier: -1
+      - code: keyboard.KeyS
+      - code: keyboard.ArrowUp
+        multiplier: -1
+      - code: keyboard.ArrowDown
+      - code: gamepad.Up
+        multiplier: -1
+      - code: gamepad.Down
+      - code: gamepad.LStickY
+      - code: vkeys.Vjoy1Y
+  - name: Zoom
+    methods:
+      - code: pointer.DeltaPinch
+      - code: pointer.Wheel
+  - name: Primary
+    methods:
+      - code: pointer.Primary
+  - name: Secondary
+    methods:
+      - code: pointer.Secondary
+  - name: Thrust
+    methods:
+      - code: keyboard.Space
+  - name: SecondaryMoveX
+    methods:
+      - code: keyboard.KeyE
+      - code: keyboard.KeyQ
+        multiplier: -1
+  - name: DebugToggle
+    methods:
+      - code: keyboard.F3
+  - name: Ternary
+    methods:
+      - code: keyboard.KeyF
+scripts:
+  - name: util
+    code: |-
+      function stringToSeed(str: string) {
+          let hash = 0;
+
+          for (let i = 0; i < str.length; i++) {
+              hash = (hash << 5) - hash + str.charCodeAt(i);
+              hash |= 0;
+          }
+
+          return hash >>> 0;
+      }
+
+      function darkenColor(color: number, factor: number): number {
+        const r = (color >> 16) & 0xff;
+        const g = (color >> 8) & 0xff;
+        const b = color & 0xff;
+
+        const newR = Math.max(0, Math.floor(r * factor));
+        const newG = Math.max(0, Math.floor(g * factor));
+        const newB = Math.max(0, Math.floor(b * factor));
+
+        return (newR << 16) | (newG << 8) | newB;
+      }
+
+      function hexToRgb(hex: number) {
+          return {
+              r: (hex >> 16) & 0xff,
+              g: (hex >> 8) & 0xff,
+              b: hex & 0xff
+          };
+      }
+
+      function rgbToHex(r: number, g: number, b: number) {
+          return (r << 16) | (g << 8) | b;
+      }
+
+      function calculateTemperatureScore(
+          difference: number,
+          weight: number
+      ): number {
+          const temperatureSharpness = 10;
+          return Math.exp(-Math.pow(difference, 2) * temperatureSharpness) * weight;
+      }
+
+      function calculateHumidityScore(
+          difference: number,
+          weight: number
+      ): number {
+          const humiditySharpness = 10;
+          return Math.exp(-Math.pow(difference, 2) * humiditySharpness) * weight;
+      }
+
+      function calculateHeightScore(
+          difference: number,
+          weight: number
+      ): number {
+          const heightSharpness = 1 / 50000;
+          return Math.exp(-Math.pow(difference, 2) * heightSharpness) * weight;
+      }
+  - name: enums
+    code: |-
+      enum BiomeLayer {
+          Sky,
+          Surface,
+          Underground,
+          Deepts,
+      }
+  - name: interfaces
+    code: |-
+      interface BiomeBlockRule {
+          blockId: number;
+          minRatioCenter?: number;
+          maxRatioCenter?: number;
+          minDetail?: number;
+          maxDetail?: number;
+          minRawHeight?: number;
+          maxRawHeight?: number;
+          minRatioHeight?: number;
+          maxRatioHeight?: number;
+      }
+
+      interface Chunk {
+          x: number;
+          y: number;
+
+          tilemap: Tilemap;
+
+          tiles: Uint8Array;
+          damage: Map<number, number>;
+          damageOverlay?: Tilemap;
+
+          background?: PIXI.Sprite;
+
+          bodies?: Matter.Body[];
+
+          isDirty: boolean;
+      }
+  - name: types
+    code: |-
+      type BlockOptions = {
+          name: string;
+          texture: string;
+          tint?: number;
+          isSolid?: boolean;
+          renderLayer?: number;
+          maxHp?: number;
+      }
+
+      type BiomeOptions = {
+          name: string;
+          layer: BiomeLayer;
+          definition: BiomeDefinition;
+          localGravity?: number;
+          fillPercent?: number;
+          ambientLight?: number;
+          backgroundTileId?: number | null;
+          rules?: BiomeBlockRule[];
+      }
+
+      type BiomeDefinitionOptions = {
+          idealTemperature: number;
+          idealHumidity: number;
+          temperatureWeight?: number;
+          humidityWeight?: number;
+      }
+
+      type LayerDefinition = {
+          id: BiomeLayer;
+          baseTop: number;
+          noise: NoiseMap;
+      };
+
+      type GameMapOptions = {
+          cellSize?: number;
+          seed?: string;
+      }
+  - name: classes
+    code: |-
+      class Block {
+          private static registry: Map<number, Block> = new Map<number, Block>();
+          private static nextId: number = 1;
+
+          id: number;
+          name: string;
+          texture: string;
+          tint: number;
+          isSolid: boolean;
+          renderLayer: number;
+          maxHp: number;
+
+          constructor(options: BlockOptions) {
+              const {
+                  name,
+                  texture,
+                  tint = 0xffffff,
+                  isSolid = true,
+                  renderLayer = 1,
+                  maxHp = 200
+              } = options;
+
+              this.id = Block.nextId++;
+              this.name = name;
+              this.texture = texture;
+              this.tint = tint;
+              this.isSolid = isSolid;
+              this.renderLayer = renderLayer;
+              this.maxHp = maxHp;
+
+              Block.registry.set(this.id, this);
+          }
+
+          static get(id: number): Block {
+              return Block.registry.get(id);
+          }
+      }
+
+      class Biome {
+          private static registry: Map<number, Biome> = new Map<number, Biome>();
+          private static nextId: number = 1;
+
+          id: number;
+          name: string;
+          localGravity: number;
+          fillPercent: number;
+          ambientLight: number;
+          layer: BiomeLayer;
+          backgroundTileId: number | null;
+          definition: BiomeDefinition;
+          rules: BiomeBlockRule[];
+
+          constructor(
+              options: BiomeOptions
+          ) {
+              const {
+                  name,
+                  layer,
+                  definition,
+                  localGravity = 0.0016,
+                  fillPercent = 0.45,
+                  ambientLight = 0xffffff,
+                  backgroundTileId = null,
+                  rules = []
+              } = options;
+
+              this.id = Biome.nextId++;
+              this.name = name;
+              this.layer = layer;
+              this.localGravity = localGravity;
+              this.fillPercent = fillPercent;
+              this.ambientLight = ambientLight;
+              this.backgroundTileId = backgroundTileId;
+              this.definition = definition;
+              this.rules = rules;
+
+              Biome.registry.set(this.id, this);
+          }
+
+          addRule(
+              rule: BiomeBlockRule
+          ): Biome {
+              this.rules.push(rule);
+              return this;
+          }
+
+          static get(id: number): Biome {
+              return Biome.registry.get(id);
+          }
+
+          static getAll(): Biome[] {
+              return [...this.registry.values()];
+          }
+
+          static getByLayer(layer: BiomeLayer) {
+              return [...this.registry.values()].filter((biome: Biome) => biome.layer == layer)
+          }
+      }
+
+      class BiomeDefinition {
+          idealTemperature: number;
+          idealHumidity: number;
+          temperatureWeight: number;
+          humidityWeight: number;
+
+          constructor(options: BiomeDefinitionOptions) {
+              const {
+                  idealTemperature,
+                  idealHumidity,
+                  temperatureWeight = 1,
+                  humidityWeight = 1
+              } = options;
+
+              this.idealTemperature = idealTemperature;
+              this.idealHumidity = idealHumidity;
+              this.temperatureWeight = temperatureWeight;
+              this.humidityWeight = humidityWeight;
+          }
+      };
+
+      class ChunkManager {
+          chunks = new Map<string, Chunk>();
+
+          getKey(x: number, y: number) {
+              return `${x},${y}`;
+          }
+
+          get(x: number, y: number) {
+              return this.chunks.get(this.getKey(x, y));
+          }
+
+          set(chunk: Chunk) {
+              this.chunks.set(this.getKey(chunk.x, chunk.y), chunk);
+          }
+
+          delete(x: number, y: number) {
+              this.chunks.delete(this.getKey(x, y));
+          }
+
+          getIndex(x: number, y: number, size: number) {
+              return y * size + x;
+          }
+      }
+
+      class NoiseMap {
+          offsetX: number;
+          offsetY: number;
+          scale: number;
+
+          octaves: number;
+          persistence: number;
+          lacunarity: number;
+          threshold: number | null;
+
+          constructor(
+              scale: number,
+              seedRandom: () => number,
+              octaves: number = 1,
+              persistence: number = 0.5,
+              lacunarity: number = 2,
+              threshold: number | null = null
+          ) {
+              this.scale = scale;
+              this.octaves = octaves;
+              this.persistence = persistence;
+              this.lacunarity = lacunarity;
+              this.threshold = threshold;
+
+              this.offsetX = seedRandom() * 100000;
+              this.offsetY = seedRandom() * 100000;
+          }
+
+          get(x: number, y: number): number {
+              let amplitude = 1;
+              let frequency = 1;
+              let total = 0;
+              let maxValue = 0;
+
+              for (let i = 0; i < this.octaves; i++) {
+
+                  const sampleX = (x + this.offsetX) / this.scale * frequency;
+                  const sampleY = (y + this.offsetY) / this.scale * frequency;
+
+                  const value = noise.perlin2d(sampleX, sampleY);
+
+                  total += value * amplitude;
+                  maxValue += amplitude;
+
+                  amplitude *= this.persistence;
+                  frequency *= this.lacunarity;
+              }
+
+              total /= maxValue;
+
+              if (this.threshold) {
+                  return (total + 1) / 2 > this.threshold ? 1 : 0;
+              }
+
+              return (total + 1) / 2;
+          }
+      }
+
+      class LightSystem {
+          private container: PIXI.Container;
+          private lightLayer: PIXI.Container;
+          private darkness: PIXI.Sprite;
+          private rt: PIXI.RenderTexture;
+
+          constructor(app: PIXI.Application) {
+              this.container = new PIXI.Container();
+              this.lightLayer = new PIXI.Container();
+
+              this.rt = PIXI.RenderTexture.create({
+                  width: app.screen.width,
+                  height: app.screen.height
+              });
+
+              this.darkness = new PIXI.Sprite(this.rt);
+              this.darkness.blendMode = PIXI.BLEND_MODES.MULTIPLY;
+
+              app.stage.addChild(this.container);
+              this.container.addChild(this.darkness);
+              this.container.addChild(this.lightLayer);
+          }
+
+          addLight(x: number, y: number, radius: number, intensity = 1) {
+              const g = new PIXI.Graphics();
+              g.beginFill(0xffffff, intensity);
+              g.drawCircle(0, 0, radius);
+              g.endFill();
+
+              g.x = x;
+              g.y = y;
+
+              this.lightLayer.addChild(g);
+              return g;
+          }
+
+          update(app: PIXI.Application) {
+              app.renderer.render(
+                  this.lightLayer,
+                  this.rt,
+                  true // clear
+              );
+          }
+      }
+  - name: blocks
+    code: |
+      const GRASSY_DIRT = new Block({
+          name: "GRASSY_DIRT",
+          texture: "grassy-dirt",
+          renderLayer: 39
+      });
+
+      const GRASS_1 = new Block({
+          name: "GRASS_1",
+          texture: "grass-5",
+          renderLayer: 1
+      });
+
+      const GRASS_2 = new Block({
+          name: "GRASS_2",
+          texture: "grass-2",
+          renderLayer: 2
+      });
+
+      const GRASS_3 = new Block({
+          name: "GRASS_3",
+          texture: "grass-3",
+          renderLayer: 3
+      });
+
+      const GRASS_4 = new Block({
+          name: "GRASS_4",
+          texture: "grass-4",
+          renderLayer: 4
+      });
+
+      const SNOW = new Block({
+          name: "SNOW",
+          texture: "snow",
+          renderLayer: 5
+      });
+
+      const ICY_SNOW = new Block({
+          name: "ICY_SNOW",
+          texture: "snow-2",
+          renderLayer: 6
+      });
+
+      const PINK_SNOW_1 = new Block({
+          name: "PINK_SNOW_1",
+          texture: "pink-snow",
+          renderLayer: 7
+      });
+
+      const PINK_SNOW_2 = new Block({
+          name: "PINK_SNOW_2",
+          texture: "pink-snow-2",
+          renderLayer: 8
+      });
+
+      const ASH = new Block({
+          name: "ASH",
+          texture: "grass-ash",
+          renderLayer: 9
+      });
+
+      const ICE_BLOCK = new Block({
+          name: "ICE_BLOCK",
+          texture: "ice-0",
+          renderLayer: 10
+      });
+
+      const SANDSTONE = new Block({
+          name: "SANDSTONE",
+          texture: "cobblestone-0",
+          renderLayer: 11
+      });
+
+      const COBBLESTONE = new Block({
+          name: "COBBLESTONE",
+          texture: "cobblestone-1",
+          renderLayer: 12
+      });
+
+      const GRASSY_STONE = new Block({
+          name: "GRASSY_STONE",
+          texture: "cobblestone-2",
+          renderLayer: 13
+      });
+
+      const LIGHT_STONE = new Block({
+          name: "LIGHT_STONE",
+          texture: "cobblestone-3",
+          renderLayer: 14
+      });
+
+      const DIRT = new Block({
+          name: "DIRT",
+          texture: "dirt",
+          renderLayer: 39
+      });
+
+      const DIRT_STONE = new Block({
+          name: "DIRT_STONE",
+          texture: "cobblestone-4",
+          renderLayer: 15
+      });
+
+      const MOSSY_STONE = new Block({
+          name: "MOSSY_STONE",
+          texture: "cobblestone-5",
+          renderLayer: 16
+      });
+
+      const DARK_STONE = new Block({
+          name: "DARK_STONE",
+          texture: "cobblestone-6",
+          renderLayer: 12
+      });
+
+      const MELTED_STONE = new Block({
+          name: "MELTED_STONE",
+          texture: "cobblestone-7",
+          renderLayer: 17
+      });
+
+      const MELTING_STONE = new Block({
+          name: "MELTING_STONE",
+          texture: "cobblestone-8",
+          renderLayer: 18
+      });
+
+      const OBSIDIAN = new Block({
+          name: "OBSIDIAN",
+          texture: "cobblestone-9",
+          renderLayer: 19
+      });
+  - name: biomes
+    code: |
+      const PLAINS = new Biome({
+          name: "Plains",
+          fillPercent: 0.65,
+          layer: BiomeLayer.Surface,
+          backgroundTileId: DIRT.id,
+          definition: new BiomeDefinition({
+              idealTemperature: 0.5,
+              idealHumidity: 0.5
+          }),
+          rules: [
+              { blockId: GRASS_1.id, maxRatioCenter: 0.005 },
+              { blockId: GRASS_1.id, minRatioHeight: 0.99 },
+              { blockId: GRASSY_DIRT.id, maxRatioCenter: 0.01 },
+              { blockId: GRASSY_DIRT.id, minRatioHeight: 0.95 },
+              { blockId: DIRT.id }
+          ]
+      });
+
+      const FROZEN = new Biome({
+          name: "Frozen",
+          fillPercent: 0.65,
+          layer: BiomeLayer.Surface,
+          backgroundTileId: ICE_BLOCK.id,
+          definition: new BiomeDefinition({
+              idealTemperature: 0.3,
+              idealHumidity: 0.7
+          }),
+          rules: [
+              { blockId: LIGHT_STONE.id, minRatioCenter: 0.5 },
+              { blockId: ICE_BLOCK.id, minRatioCenter: 0.02 },
+              { blockId: ICY_SNOW.id, minDetail: 0.5 },
+              { blockId: SNOW.id }
+          ]
+      });
+
+      const AIR = new Biome({
+          name: "Air",
+          layer: BiomeLayer.Sky,
+          definition: new BiomeDefinition({
+              idealTemperature: 0,
+              idealHumidity: 0,
+              temperatureWeight: 0,
+              humidityWeight: 0
+          })
+      });
+
+      const CAVERNS = new Biome({
+          name: "Caverns",
+          fillPercent: 0.47,
+          backgroundTileId: COBBLESTONE.id,
+          layer: BiomeLayer.Underground,
+          definition: new BiomeDefinition({
+              idealTemperature: 0.5,
+              idealHumidity: 0.3
+          }),
+          rules: [
+              { blockId: LIGHT_STONE.id, maxDetail: 0.6, minDetail: 0.4 },
+              { blockId: COBBLESTONE.id, minDetail: 0.6 },
+              { blockId: DARK_STONE.id, maxDetail: 0.4 }
+          ]
+      });
+
+      const MELTEN = new Biome({
+          name: "Melten",
+          fillPercent: 0.42,
+          backgroundTileId: MELTING_STONE.id,
+          layer: BiomeLayer.Deepts,
+          definition: new BiomeDefinition({
+              idealHumidity: 0.6,
+              idealTemperature: 0.7
+          }),
+          rules: [
+              { blockId: OBSIDIAN.id, minRatioCenter: 0.3 },
+              { blockId: PINK_SNOW_2.id, minRatioCenter: 0.1, minDetail: 0.75 },
+              { blockId: PINK_SNOW_1.id, minRatioCenter: 0.1, minDetail: 0.5 },
+              { blockId: MELTED_STONE.id, minRatioCenter: 0.15 },
+              { blockId: MELTING_STONE.id }
+          ]
+      });
+
+      const FUNGHY = new Biome({
+          name: "Funghy",
+          fillPercent: 65,
+          layer: BiomeLayer.Surface,
+          backgroundTileId: MOSSY_STONE.id,
+          definition: new BiomeDefinition({
+              idealTemperature: 0.5,
+              idealHumidity: 0.7,
+          }),
+          rules: [
+              { blockId: GRASS_2.id, minRatioHeight: 0.95 },
+              { blockId: DIRT_STONE.id, minDetail: 0.6 },
+              { blockId: MOSSY_STONE.id, maxDetail: 0.4 },
+              { blockId: GRASSY_STONE.id }
+          ]
+      });
+
+      // const SAND_CAVERN = new Biome(
+      //     "SandCavern",
+      //     0.38,
+      //     SANDSTONE,
+      //     {
+      //         idealTemperature: 0.7,
+      //         idealHumidity: 0.3,
+      //     },
+      //     {
+      //         ambientLight: 0x888888
+      //     }
+      // )
+      //     .addRule(GRASS_1, { maxElevation: 0.1, minDetail: 0.7 })
+      //     .addRule(DIRT_STONE, { minDetail: 0.7 })
+      //     .addRule(GRASS_4, { minElevation: 0.02, minDetail: 0.6 })
+      //     .addRule(SANDSTONE, { minElevation: 0.02 })
+      //     .addRule(GRASS_4);
+
+      // const BAREN = new Biome(
+      //     "SandCavern",
+      //     0.35,
+      //     LIGHT_STONE,
+      //     {
+      //         idealHumidity: 0.3,
+      //         idealTemperature: 0.3
+      //     },
+      //     {
+      //         ambientLight: 0x111111
+      //     }
+      // )
+      //     .addRule(ICE_BLOCK, { maxElevation: 0.3, minDetail: 0.7 })
+      //     .addRule(LIGHT_STONE, { minElevation: 0.02 })
+      //     .addRule(ASH);
+
+      // const BURNT = new Biome(
+      //     "Burnt",
+      //     0.45,
+      //     MELTED_STONE,
+      //     {
+      //         idealTemperature: 0.7,
+      //         idealHumidity: 0.5,
+      //     },
+      //     {
+      //         ambientLight: 0x888888
+      //     }
+      // )
+      //     .addRule(OBSIDIAN, { minElevation: 0.7, minDetail: 0.5 })
+      //     .addRule(MELTING_STONE, { maxElevation: 0.3, minDetail: 0.7 })
+      //     .addRule(PINK_SNOW_1, { minDetail: 0.4 })
+      //     .addRule(PINK_SNOW_2, { minDetail: 0.6 })
+      //     .addRule(MELTED_STONE);
+
+      // const COLD_CAVERNS = new Biome(
+      //     "ColdCaverns",
+      //     0.45,
+      //     LIGHT_STONE,
+      //     {
+      //         idealTemperature: 0.25,
+      //         idealHumidity: 0.5,
+      //     },
+      //     {
+      //         ambientLight: 0x555555
+      //     }
+      // )
+      //     .addRule(ICE_BLOCK, { maxElevation: 0.1, minDetail: 0.5 })
+      //     .addRule(COBBLESTONE, { minDetail: 0.7 })
+      //     .addRule(LIGHT_STONE)
+      //     .addRule(ICY_SNOW, { minDetail: 0.5 })
+      //     .addRule(SNOW);
+  - name: globals
+    code: |-
+      const SKY_TOP = -100;
+      const SURFACE_TOP = 0;
+      const UNDERGROUND_TOP = 30;
+      const DEEPTS_TOP = 600;
+      const MAP_BOTTOM = 700;
+
+      const COLLISION_CATEGORY_PLAYER = 0x0001;
+      const COLLISION_CATEGORY_SHIP = 0x0002;
+      const COLLISION_CATEGORY_WORLD = 0x0004;
+
+      let isDebugMode: boolean = false;
+
+      const lightSystem = new LightSystem(pixiApp);
+  - name: debug
+    code: |-
+      type DebugValue = any | (() => any);
+
+      class Debug {
+          private static _initialized = false;
+          private static _visible = true;
+
+          private static _items: Record<string, DebugValue> = {};
+          private static _order: string[] = [];
+
+          static init(): void {
+              this._initialized = true;
+          }
+
+          static show(visible: boolean = true): void {
+              this._visible = visible;
+          }
+
+          static toggle(): void {
+              this._visible = !this._visible;
+          }
+
+          static clear(): void {
+              this._items = {};
+              this._order = [];
+          }
+
+          static set(label: string, value: DebugValue): void {
+              if (!(label in this._items)) {
+                  this._order.push(label);
+              }
+              this._items[label] = value;
+          }
+
+          static remove(label: string): void {
+              if (label in this._items) {
+                  delete this._items[label];
+                  this._order = this._order.filter(l => l !== label);
+              }
+          }
+
+          private static _formatValue(v: DebugValue): string {
+              try {
+                  if (typeof v === "function") {
+                      return String((v as () => any)());
+                  }
+                  return String(v);
+              } catch (e: any) {
+                  return `<err: ${e?.message ?? e}>`;
+              }
+          }
+
+          static update(copy: any): void {
+              if (!this._initialized || !this._visible || this._order.length === 0) {
+                  if (copy) copy.text = "";
+                  return;
+              }
+
+              const lines: string[] = [];
+
+              for (const label of this._order) {
+                  const value = this._formatValue(this._items[label]);
+                  lines.push(`${label}: ${value}`);
+              }
+
+              if (copy) {
+                  copy.text = lines.join("\n");
+              }
+          }
+      }
+  - name: world
+    code: |-
+      let world: World;
+
+      type Tilemap = ReturnType<typeof tilemaps.create>;
+
+      class World {
+          x: number;
+          y: number;
+
+          cellSize: number;
+          chunkSize: number;
+
+          matterEngine: Matter.Engine;
+          layers: LayerDefinition[];
+
+          terrainNoiseMap: NoiseMap;
+          temperatureNoiseMap: NoiseMap;
+          humidityNoiseMap: NoiseMap;
+          detailNoiseMap: NoiseMap;
+
+          chunkManager: ChunkManager;
+
+          random: () => number;
+          seed: number;
+
+          private chunkAnchors = new Map<string, number>();
+          private cellOffset: number;
+          private visibleChunks = new Set<string>();
+
+          constructor(matterEngine: Matter.Engine, params: GameMapOptions = {}) {
+              const {
+                  cellSize = 16,
+                  seed
+              } = params;
+
+              this.x = 0;
+              this.y = 0;
+
+              this.matterEngine = matterEngine;
+              this.cellSize = cellSize;
+
+              this.chunkSize = 32;
+              this.cellOffset = this.cellSize / 2;
+
+              this.seed = stringToSeed(seed ?? Date.now().toString());
+              this.random = random.createSeededRandomizer(this.seed);
+
+              noise.setSeed(this.seed);
+
+              this.temperatureNoiseMap = new NoiseMap(400, this.random)
+              this.humidityNoiseMap = new NoiseMap(400, this.random)
+              this.terrainNoiseMap = new NoiseMap(40, this.random, 4, 0.5, 2);
+              this.detailNoiseMap = new NoiseMap(25, this.random)
+              this.layers = [
+                  {
+                      id: BiomeLayer.Sky,
+                      baseTop: SKY_TOP,
+                      noise: new NoiseMap(1, this.random),
+                  },
+                  {
+                      id: BiomeLayer.Surface,
+                      baseTop: SURFACE_TOP,
+                      noise: new NoiseMap(30, this.random, 4, 0.7, 2),
+                  },
+                  {
+                      id: BiomeLayer.Underground,
+                      baseTop: UNDERGROUND_TOP,
+                      noise: new NoiseMap(50, this.random, 4, 0.6, 2),
+                  },
+                  {
+                      id: BiomeLayer.Deepts,
+                      baseTop: DEEPTS_TOP,
+                      noise: new NoiseMap(70, this.random, 4, 0.5, 2),
+                  },
+              ];
+
+              this.chunkManager = new ChunkManager();
+
+              Matter.Events.on(this.matterEngine, "collisionStart", function (event) {
+                  for (const pair of event.pairs) {
+                      const a = pair.bodyA.copy;
+                      const b = pair.bodyB.copy;
+
+                      if (!!a && a.onCollisionStart) a.onCollisionStart(pair.bodyB, pair);
+                      if (!!b && b.onCollisionStart) b.onCollisionStart(pair.bodyA, pair);
+                  }
+              });
+
+              Matter.Events.on(this.matterEngine, "collisionEnd", function (event) {
+                  for (const pair of event.pairs) {
+                      const a = pair.bodyA.copy;
+                      const b = pair.bodyB.copy;
+
+                      if (!!a && a.onCollisionEnd) a.onCollisionEnd(pair.bodyB, pair);
+                      if (!!b && b.onCollisionEnd) b.onCollisionEnd(pair.bodyA, pair);
+                  }
+              });
+
+              Matter.Events.on(this.matterEngine, "collisionActive", function (event) {
+                  for (const pair of event.pairs) {
+                      const a = pair.bodyA.copy;
+                      const b = pair.bodyB.copy;
+
+                      if (!!a && a.onCollisionActive) a.onCollisionActive(pair.bodyB, pair);
+                      if (!!b && b.onCollisionActive) b.onCollisionActive(pair.bodyA, pair);
+                  }
+              });
+
+              // this.matterEngine.enableSleeping = true;
+          }
+
+          private getLayerBoundary(layer: BiomeLayer, worldX: number): number {
+              const layerDef = this.layers.find(l => l.id === layer);
+              if (!layerDef) throw new Error("Invalid layer");
+
+              const noise = layerDef.noise.get(worldX, 0);
+
+              return layerDef.baseTop + (noise - 0.5) * 40;
+          }
+
+          getLayerAt(worldX: number, worldY: number): BiomeLayer {
+              for (let i = 0; i < this.layers.length; i++) {
+                  const current = this.layers[i];
+                  const next = this.layers[i + 1];
+
+                  const currentTop = this.getLayerBoundary(current.id, worldX);
+                  const nextTop = next
+                      ? this.getLayerBoundary(next.id, worldX)
+                      : MAP_BOTTOM;
+
+                  if (worldY >= currentTop && worldY < nextTop) {
+                      return current.id;
+                  }
+              }
+
+              return this.layers[this.layers.length - 1].id;
+          }
+
+          getBodiesNear(x: number, y: number, radius: number = 2) {
+              const bodies = [];
+
+              const cx = Math.floor(x / this.chunkSize);
+              const cy = Math.floor(y / this.chunkSize);
+
+              for (let dx = -radius; dx <= radius; dx++) {
+                  for (let dy = -radius; dy <= radius; dy++) {
+                      const chunk = this.chunkManager.get(cx + dx, cy + dy);
+                      if (chunk?.bodies) {
+                          bodies.push(...chunk.bodies);
+                      }
+                  }
+              }
+
+              return bodies;
+          }
+
+          getBiome(worldX: number, worldY: number): Biome {
+              const temperatureNoise = this.temperatureNoiseMap.get(worldX, worldY);
+              const humidityNoise = this.humidityNoiseMap.get(worldX, worldY);
+
+              const layer = this.getLayerAt(worldX, worldY);
+              const biomes = Biome.getByLayer(layer);
+
+              let bestBiome: Biome | null = null;
+              let bestScore = -Infinity;
+
+              for (const biome of biomes) {
+                  const definition = biome.definition;
+
+                  const temperatureDifference = temperatureNoise - definition.idealTemperature;
+
+                  const humidityDifference = humidityNoise - definition.idealHumidity;
+
+                  const temperatureScore = calculateTemperatureScore(
+                      temperatureDifference,
+                      definition.temperatureWeight
+                  );
+
+                  const humidityScore = calculateHumidityScore(
+                      humidityDifference,
+                      definition.humidityWeight
+                  );
+
+                  const totalScore = temperatureScore + humidityScore;
+
+                  if (totalScore > bestScore) {
+                      bestScore = totalScore;
+                      bestBiome = biome;
+                  }
+              }
+
+              if (!bestBiome) {
+                  throw new Error("No biomes registered");
+              }
+
+              return bestBiome;
+          }
+
+          private getBackgroundId(worldX: number, worldY: number): number {
+              const biome = this.getBiome(worldX, worldY);
+
+              if (!biome.backgroundTileId) return 0;
+
+              return biome.backgroundTileId;
+          }
+
+          private buildChunkBackground(chunk: Chunk) {
+              const { x: cx, y: cy } = chunk;
+
+              if (chunk.background) {
+                  chunk.background.destroy();
+              }
+
+              const tilemap = tilemaps.create(-1);
+              tilemap.zIndex = -5;
+              rooms.current.addChild(tilemap);
+
+              const size = this.chunkSize;
+
+              for (let gx = -1; gx <= size; gx++) {
+                  for (let gy = -1; gy <= size; gy++) {
+
+                      const worldX = cx * size + gx;
+                      const worldY = cy * size + gy;
+
+                      const ids = [
+                          this.getBackgroundId(worldX - 1, worldY - 1),
+                          this.getBackgroundId(worldX, worldY - 1),
+                          this.getBackgroundId(worldX - 1, worldY),
+                          this.getBackgroundId(worldX, worldY)
+                      ];
+
+                      const uniqueIds = [...new Set(ids.filter(id => id !== 0))];
+
+                      for (const id of uniqueIds) {
+
+                          const tl = ids[0] === id ? 1 : 0;
+                          const tr = ids[1] === id ? 1 : 0;
+                          const bl = ids[2] === id ? 1 : 0;
+                          const br = ids[3] === id ? 1 : 0;
+
+                          const mask = (tl << 3) | (tr << 2) | (bl << 1) | br;
+                          if (mask === 0) continue;
+
+                          const { frame, angle } = this.resolveCornerFrame(mask, worldX, worldY);
+
+                          const px = this.x + worldX * this.cellSize;
+                          const py = this.y + worldY * this.cellSize;
+
+                          const block = Block.get(id);
+                          if (!block) continue;
+
+                          const sprite = tilemap.addTile(
+                              block.texture,
+                              px,
+                              py,
+                              frame
+                          );
+
+                          sprite.angle = angle;
+                          sprite.tint = darkenColor(block.tint, 0.75);
+                      }
+                  }
+              }
+
+              chunk.background = tilemap;
+          }
+
+          private rotateCornerMask(mask: number): number {
+              const tl = (mask >> 3) & 1;
+              const tr = (mask >> 2) & 1;
+              const bl = (mask >> 1) & 1;
+              const br = mask & 1;
+
+              return (
+                  (tr << 3) |
+                  (br << 2) |
+                  (tl << 1) |
+                  (bl)
+              );
+          }
+
+          private resolveCornerFrame(mask: number, worldX: number, worldY: number): { frame: number, angle: 0 | 90 | 180 | 270 } {
+              for (let rotation = 0; rotation < 4; rotation++) {
+                  switch (mask) {
+                      case 0b0001:
+                          return { frame: 0, angle: (rotation * 90) as 0 | 90 | 180 | 270 };
+                      case 0b0110:
+                          return { frame: 1, angle: (rotation * 90) as 0 | 90 | 180 | 270 };
+                      case 0b1100:
+                          return { frame: 2, angle: (rotation * 90) as 0 | 90 | 180 | 270 };
+                      case 0b1101:
+                          return { frame: 3, angle: (rotation * 90) as 0 | 90 | 180 | 270 };
+                      case 0b1111: {
+                          const n = this.hash2D(worldX, worldY);
+                          const rotIndex = Math.floor(n * 4);
+                          return {
+                              frame: 4,
+                              angle: (rotIndex * 90) as 0 | 90 | 180 | 270
+                          };
+                      }
+                  }
+
+                  mask = this.rotateCornerMask(mask);
+              }
+
+              return { frame: 0, angle: 0 };
+          }
+
+          private destroyChunkBackground(chunk: Chunk) {
+              if (!chunk.background) return;
+
+              chunk.background.destroy();
+              chunk.background = undefined;
+          }
+
+          private generateChunk(cx: number, cy: number): Chunk {
+              const size = this.chunkSize;
+              const tiles = new Uint8Array(size * size);
+
+              for (let x = 0; x < size; x++) {
+                  for (let y = 0; y < size; y++) {
+                      const worldX = cx * size + x;
+                      const worldY = cy * size + y;
+
+                      const biome = this.getBiome(worldX, worldY);
+
+                      const terrainNoise = this.getWarpedNoise(worldX, worldY);
+
+                      const isSolid = terrainNoise < biome.fillPercent;
+
+                      const index = y * size + x;
+                      if (!isSolid) {
+                          tiles[index] = 0;
+                      } else {
+                          tiles[index] = this.selectBiomeBlock(biome, worldX, worldY);
+                      }
+                  }
+              }
+
+              return {
+                  x: cx,
+                  y: cy,
+                  tiles,
+                  tilemap: tilemaps.create(-1),
+                  isDirty: true,
+                  damage: new Map(),
+              };
+          }
+
+          updateChunkVisibility(camera: PIXI.Rectangle) {
+              const chunkWorldSize = this.chunkSize * this.cellSize;
+
+              const startX = Math.floor((camera.x - this.x) / chunkWorldSize);
+              const endX = Math.floor((camera.x + camera.width - this.x) / chunkWorldSize);
+
+              const startY = Math.floor((camera.y - this.y) / chunkWorldSize);
+              const endY = Math.floor((camera.y + camera.height - this.y) / chunkWorldSize);
+
+              if (!Number.isFinite(startX) ||
+                  !Number.isFinite(endX) ||
+                  !Number.isFinite(startY) ||
+                  !Number.isFinite(endY)) {
+                  console.error("Chunk bounds invalid", { startX, endX, startY, endY });
+                  return;
+              }
+
+              const newVisible = new Set<string>();
+
+              for (let cx = startX; cx <= endX; cx++) {
+                  for (let cy = startY; cy <= endY; cy++) {
+                      const key = this.chunkManager.getKey(cx, cy);
+                      newVisible.add(key);
+
+                      if (!this.visibleChunks.has(key)) {
+                          this.buildChunk(cx, cy);
+                      }
+                  }
+              }
+
+              for (const key of this.visibleChunks) {
+                  if (!newVisible.has(key) && !this.isChunkAnchored(key)) {
+                      const [cx, cy] = key.split(',').map(Number);
+                      this.unloadChunk(cx, cy);
+                  }
+              }
+
+              this.visibleChunks = newVisible;
+          }
+
+          private isChunkAnchored(key: string): boolean {
+              const [cx, cy] = key.split(',').map(Number);
+
+              for (const [anchorKey, radius] of this.chunkAnchors) {
+                  const [ax, ay] = anchorKey.split(',').map(Number);
+
+                  const dx = Math.abs(cx - ax);
+                  const dy = Math.abs(cy - ay);
+
+                  if (dx <= radius && dy <= radius) {
+                      return true;
+                  }
+              }
+
+              return false;
+          }
+
+          private getBlock(worldX: number, worldY: number): number {
+              const cx = Math.floor(worldX / this.chunkSize);
+              const cy = Math.floor(worldY / this.chunkSize);
+
+              const chunk = this.chunkManager.get(cx, cy);
+
+              if (chunk) {
+                  const localX = ((worldX % this.chunkSize) + this.chunkSize) % this.chunkSize;
+                  const localY = ((worldY % this.chunkSize) + this.chunkSize) % this.chunkSize;
+
+                  return chunk.tiles[localY * this.chunkSize + localX];
+              }
+
+              const biome = this.getBiome(worldX, worldY);
+
+              if (biome == AIR) {
+                  return 0;
+              }
+
+              const terrainNoise = this.getWarpedNoise(worldX, worldY);
+
+              const isSolid = terrainNoise < biome.fillPercent;
+
+              if (!isSolid) return 0;
+              return this.selectBiomeBlock(biome, worldX, worldY);
+          }
+
+          private getWarpedNoise(x: number, y: number): number {
+              const warp = 20;
+
+              const wx = x + noise.perlin2d(x / 100, y / 100) * warp;
+              const wy = y + noise.perlin2d((x + 999) / 100, (y + 999) / 100) * warp;
+
+              return this.terrainNoiseMap.get(wx, wy);
+          }
+
+          private buildChunkPhysics(chunk: Chunk) {
+              if (chunk.bodies) return;
+
+              const bodies: Matter.Body[] = [];
+
+              const { x: cx, y: cy, tiles } = chunk;
+              const size = this.chunkSize;
+
+              for (let y = 0; y < size; y++) {
+                  let runStart = -1;
+
+                  for (let x = 0; x < size; x++) {
+                      const index = y * size + x;
+                      const solid = tiles[index] !== 0;
+
+                      if (solid && runStart === -1) {
+                          runStart = x;
+                      }
+
+                      const isLast = x === size - 1;
+
+                      if ((!solid || isLast) && runStart !== -1) {
+                          const runEnd = solid && isLast ? x : x - 1;
+
+                          const width = (runEnd - runStart + 1) * this.cellSize;
+                          const height = this.cellSize;
+
+                          const worldX =
+                              this.x +
+                              (cx * size + runStart) * this.cellSize +
+                              width / 2;
+
+                          const worldY =
+                              this.y +
+                              (cy * size + y) * this.cellSize +
+                              height / 2;
+
+                          const body = Matter.Bodies.rectangle(
+                              worldX,
+                              worldY,
+                              width,
+                              height,
+                              {
+                                  isStatic: true, collisionFilter: {
+                                      category: COLLISION_CATEGORY_WORLD,
+                                      mask: COLLISION_CATEGORY_PLAYER | COLLISION_CATEGORY_SHIP
+                                  },
+                                  restitution: 0
+                              }
+                          );
+
+                          Matter.World.add(this.matterEngine.world, body);
+                          bodies.push(body);
+
+                          runStart = -1;
+                      }
+                  }
+              }
+
+              chunk.bodies = bodies;
+          }
+
+          private destroyChunkPhysics(chunk: Chunk) {
+              if (!chunk.bodies) return;
+
+              for (const body of chunk.bodies) {
+                  Matter.World.remove(this.matterEngine.world, body);
+              }
+
+              chunk.bodies = undefined;
+          }
+
+          drawChunkBorders(container: PIXI.Container): PIXI.Graphics {
+              const graphics = new PIXI.Graphics();
+
+              const chunkWorldSize = this.chunkSize * this.cellSize;
+
+              graphics.lineStyle(camera.scale.x * 2, 0xff0000, 0.8);
+
+              for (const chunk of this.chunkManager.chunks.values()) {
+                  const worldX = this.x + chunk.x * chunkWorldSize;
+                  const worldY = this.y + chunk.y * chunkWorldSize;
+
+                  graphics.drawRect(
+                      worldX,
+                      worldY,
+                      chunkWorldSize,
+                      chunkWorldSize
+                  );
+              }
+
+              container.addChild(graphics);
+              return graphics;
+          }
+
+          private hash2D(x: number, y: number): number {
+              let h = x * 374761393 + y * 668265263 + this.seed;
+              h = (h ^ (h >> 13)) >>> 0;
+              h = (h * 1274126177) >>> 0;
+
+              return (h >>> 0) / 4294967295;
+          }
+
+          private rebuildChunk(chunk: Chunk) {
+              const { x: cx, y: cy } = chunk;
+
+              if (chunk.tilemap) {
+                  chunk.tilemap.destroy();
+              }
+
+              const tilemap = tilemaps.create(-1);
+              const size = this.chunkSize;
+
+              const drawQueue: {
+                  layer: number;
+                  textureName: string;
+                  x: number;
+                  y: number;
+                  frame: number;
+                  angle: number;
+                  tint: number;
+              }[] = [];
+
+              for (let gx = -1; gx <= size; gx++) {
+                  for (let gy = -1; gy <= size; gy++) {
+
+                      const worldX = cx * size + gx;
+                      const worldY = cy * size + gy;
+
+                      const ids = [
+                          this.getBlock(worldX - 1, worldY - 1),
+                          this.getBlock(worldX, worldY - 1),
+                          this.getBlock(worldX - 1, worldY),
+                          this.getBlock(worldX, worldY)
+                      ];
+
+                      const blocks = ids
+                          .map(id => id !== 0 ? Block.get(id) : undefined)
+                          .filter(t => t !== undefined) as Block[];
+
+                      const uniqueLayers = [...new Set(blocks.map(t => t.renderLayer))];
+
+                      for (const layer of uniqueLayers) {
+
+                          const tl = (Block.get(ids[0])?.renderLayer === layer) ? 1 : 0;
+                          const tr = (Block.get(ids[1])?.renderLayer === layer) ? 1 : 0;
+                          const bl = (Block.get(ids[2])?.renderLayer === layer) ? 1 : 0;
+                          const br = (Block.get(ids[3])?.renderLayer === layer) ? 1 : 0;
+
+                          const mask = (tl << 3) | (tr << 2) | (bl << 1) | br;
+                          if (mask === 0) continue;
+
+                          const { frame, angle } = this.resolveCornerFrame(mask, worldX, worldY);
+
+                          const px = this.x + worldX * this.cellSize;
+                          const py = this.y + worldY * this.cellSize;
+
+                          const representative = blocks.find(t => t.renderLayer === layer);
+                          if (!representative) continue;
+
+                          drawQueue.push({
+                              layer: representative.renderLayer,
+                              textureName: representative.texture,
+                              x: px,
+                              y: py,
+                              frame,
+                              angle,
+                              tint: representative.tint
+                          });
+                      }
+                  }
+              }
+
+              drawQueue.sort((a, b) => {
+                  if (a.layer !== b.layer) return a.layer - b.layer;
+                  return a.y - b.y;
+              });
+
+              for (const item of drawQueue) {
+                  const sprite = tilemap.addTile(
+                      item.textureName,
+                      item.x,
+                      item.y,
+                      item.frame
+                  );
+
+                  sprite.angle = item.angle;
+                  sprite.tint = item.tint;
+              }
+
+              chunk.tilemap = tilemap;
+
+              this.destroyChunkPhysics(chunk);
+              this.buildChunkPhysics(chunk);
+          }
+
+          private unloadChunk(cx: number, cy: number) {
+              const chunk = this.chunkManager.get(cx, cy);
+              if (!chunk) return;
+
+              this.destroyChunkPhysics(chunk);
+              this.destroyChunkBackground(chunk);
+
+              if (chunk.damageOverlay) {
+                  chunk.damageOverlay.destroy();
+                  chunk.damageOverlay = undefined;
+              }
+          }
+
+          private buildChunk(cx: number, cy: number) {
+              let chunk = this.chunkManager.get(cx, cy);
+
+              if (!chunk) {
+                  chunk = this.generateChunk(cx, cy);
+                  this.chunkManager.set(chunk);
+              }
+
+              this.buildChunkBackground(chunk);
+              this.rebuildChunk(chunk);
+              this.buildDamageOverlay(chunk);
+          }
+
+          private buildDamageOverlay(chunk: Chunk) {
+              if (chunk.damageOverlay) return;
+
+              const overlay = tilemaps.create(-1);
+
+              overlay.zIndex = 9999;
+              rooms.current.addChild(overlay);
+
+              chunk.damageOverlay = overlay;
+
+              this.renderChunkDamage(chunk);
+          }
+
+          private renderChunkDamage(chunk: Chunk) {
+              if (!chunk.damageOverlay) return;
+
+              chunk.damageOverlay.destroy();
+              const overlay = tilemaps.create(-1);
+              overlay.zIndex = 9999;
+              rooms.current.addChild(overlay);
+              chunk.damageOverlay = overlay;
+
+              for (const [index, damage] of chunk.damage) {
+                  const tileId = chunk.tiles[index];
+                  if (!tileId) continue;
+
+                  const tile = Block.get(tileId);
+                  if (!tile) continue;
+
+                  const percent = damage / tile.maxHp;
+
+                  const localX = index % this.chunkSize;
+                  const localY = Math.floor(index / this.chunkSize);
+
+                  const worldX = this.x +
+                      (chunk.x * this.chunkSize + localX) * this.cellSize + this.cellOffset;
+
+                  const worldY = this.y +
+                      (chunk.y * this.chunkSize + localY) * this.cellSize + this.cellOffset;
+
+                  const frame =
+                      percent < 0.33 ? 0 :
+                          percent < 0.66 ? 1 :
+                              2;
+
+                  overlay.addTile("crack", worldX, worldY, frame).alpha = 0.5;
+              }
+          }
+
+          private getRatioCenter(
+              biome: Biome,
+              worldX: number,
+              worldY: number
+          ): number {
+
+              const raw = this.getWarpedNoise(worldX, worldY);
+              const threshold = biome.fillPercent;
+
+              if (raw >= threshold) return 0;
+
+              return 1 - (raw / threshold);
+          }
+
+          private selectBiomeBlock(
+              biome: Biome,
+              worldX: number,
+              worldY: number
+          ): number {
+              const ratioCenter = this.getRatioCenter(biome, worldX, worldY);
+              const detail = this.detailNoiseMap.get(worldX, worldY);
+              const { bottom, top } = this.getBiomeVerticalBounds(biome.layer, worldX);
+
+              const biomeHeight = Math.abs(bottom - top);
+
+              const ratioHeight =
+                  biomeHeight != 0
+                      ? 1 - (worldY - top) / biomeHeight
+                      : 0;
+
+              for (const rule of biome.rules) {
+                  if (rule.minRatioCenter !== undefined && ratioCenter < rule.minRatioCenter) continue;
+                  if (rule.maxRatioCenter !== undefined && ratioCenter > rule.maxRatioCenter) continue;
+                  if (rule.minDetail !== undefined && detail < rule.minDetail) continue;
+                  if (rule.maxDetail !== undefined && detail > rule.maxDetail) continue;
+                  if (rule.minRawHeight !== undefined && worldY < rule.minRawHeight) continue;
+                  if (rule.maxRawHeight !== undefined && worldY > rule.maxRawHeight) continue;
+                  if (rule.minRatioHeight !== undefined && ratioHeight < rule.minRatioHeight) continue;
+                  if (rule.maxRatioHeight !== undefined && ratioHeight > rule.maxRatioHeight) continue;
+
+                  return rule.blockId;
+              }
+
+              return 0;
+          }
+
+          getBiomeVerticalBounds(layer: BiomeLayer, worldX: number) {
+              const index = this.layers.findIndex(l => l.id === layer);
+              if (index === -1) throw new Error("Invalid layer");
+
+              const top = this.getLayerBoundary(layer, worldX);
+
+              const bottom = this.layers[index + 1]
+                  ? this.getLayerBoundary(this.layers[index + 1].id, worldX)
+                  : MAP_BOTTOM;
+
+              return { top, bottom };
+          }
+
+          getCoordByIndex(worldX: number, worldY: number, anchor: "topLeft" | "center" = "topLeft"): { x: number, y: number } {
+              let x = worldX * this.cellSize;
+              let y = worldY * this.cellSize;
+
+              if (anchor == "center") {
+                  x += this.cellOffset;
+                  y += this.cellOffset;
+              }
+
+              return { x, y };
+          }
+
+          getWorldIndex(x: number, y: number): { worldX: number, worldY: number } {
+              const worldX = Math.floor((x - this.x) / this.cellSize);
+              const worldY = Math.floor((y - this.y) / this.cellSize);
+
+              return { worldX, worldY };
+          }
+
+          changeTile(x: number, y: number, newTileIndex: number = 0) {
+              const { worldX, worldY } = this.getWorldIndex(x, y);
+
+              this.changeTileByIndex(worldX, worldY, newTileIndex);
+          }
+
+          changeTileByIndex(worldX: number, worldY: number, newTileIndex: number = 0) {
+              const cx = Math.floor(worldX / this.chunkSize);
+              const cy = Math.floor(worldY / this.chunkSize);
+
+              let chunk = this.chunkManager.get(cx, cy);
+
+              if (!chunk) {
+                  this.buildChunk(cx, cy);
+                  chunk = this.chunkManager.get(cx, cy);
+              }
+
+              const localX = ((worldX % this.chunkSize) + this.chunkSize) % this.chunkSize;
+              const localY = ((worldY % this.chunkSize) + this.chunkSize) % this.chunkSize;
+
+              const index = localY * this.chunkSize + localX;
+
+              if (chunk.tiles[index] === newTileIndex) return;
+
+              chunk.tiles[index] = newTileIndex;
+              chunk.isDirty = true;
+
+              this.rebuildChunk(chunk);
+
+              const neighbors = [
+                  [0, 0],
+
+                  [-1, 0],
+                  [1, 0],
+                  [0, -1],
+                  [0, 1],
+
+                  [-1, -1],
+                  [1, -1],
+                  [-1, 1],
+                  [1, 1],
+              ];
+
+              for (const [dx, dy] of neighbors) {
+                  const nx = cx + dx;
+                  const ny = cy + dy;
+
+                  const neighbor = this.chunkManager.get(nx, ny);
+
+                  if (!neighbor) continue;
+
+                  this.rebuildChunk(neighbor);
+              }
+          }
+
+          damageTile(x: number, y: number, amount: number) {
+              const { worldX, worldY } = this.getWorldIndex(x, y);
+
+              this.damageTileByIndex(worldX, worldY, amount);
+          }
+
+          damageTileByIndex(worldX: number, worldY: number, amount: number) {
+              const cx = Math.floor(worldX / this.chunkSize);
+              const cy = Math.floor(worldY / this.chunkSize);
+
+              let chunk = this.chunkManager.get(cx, cy);
+              if (!chunk) {
+                  this.buildChunk(cx, cy);
+                  chunk = this.chunkManager.get(cx, cy);
+              }
+
+              const localX = ((worldX % this.chunkSize) + this.chunkSize) % this.chunkSize;
+              const localY = ((worldY % this.chunkSize) + this.chunkSize) % this.chunkSize;
+
+              const index = localY * this.chunkSize + localX;
+
+              const tileId = chunk.tiles[index];
+              if (!tileId) return;
+
+              const tile = Block.get(tileId);
+              if (!tile) return;
+
+              const currentDamage = chunk.damage.get(index) ?? 0;
+              const newDamage = currentDamage + amount;
+
+              if (newDamage >= tile.maxHp) {
+                  chunk.tiles[index] = 0;
+                  chunk.damage.delete(index);
+
+                  const neighbors = [
+                      [0, 0],
+                      [-1, 0],
+                      [1, 0],
+                      [0, -1],
+                      [0, 1],
+                      [-1, -1],
+                      [1, -1],
+                      [-1, 1],
+                      [1, 1],
+                  ];
+
+                  for (const [dx, dy] of neighbors) {
+                      const nx = cx + dx;
+                      const ny = cy + dy;
+
+                      const neighbor = this.chunkManager.get(nx, ny);
+                      if (!neighbor) continue;
+
+                      this.rebuildChunk(neighbor);
+                      this.renderChunkDamage(neighbor);
+                  }
+              }
+
+              chunk.damage.set(index, newDamage);
+
+              this.renderChunkDamage(chunk);
+          }
+      }
+assets:
+  - type: folder
+    uid: M43dcc8Fnb5Dhc
+    colorClass: warning
+    icon: texture
+    name: Textures
+    lastmod: 1771358741477
+    entries:
+      - type: folder
+        uid: Cc7t26ND2q3R9f
+        colorClass: success
+        icon: square
+        name: Blocks
+        lastmod: 1772137416847
+        entries:
+          - lastmod: 1771693658938
+            type: texture
+            name: cobblestone-0
+            untill: 0
+            grid:
+              - 5
+              - 1
+            axis:
+              - 8
+              - 8
+            marginx: 0
+            marginy: 0
+            imgWidth: 80
+            imgHeight: 16
+            width: 16
+            height: 16
+            offx: 0
+            offy: 0
+            origname: ifzkgH235wGffgL.png
+            shape: rect
+            left: 8
+            right: 8
+            top: 8
+            bottom: 8
+            uid: fzkgH235wGffgL
+            padding: 1
+            isBlank: false
+            source: 'C:\Users\Chico\Downloads\cobblestone-0.png'
+          - lastmod: 1771699090540
+            type: texture
+            name: cobblestone-1
+            untill: 0
+            grid:
+              - 5
+              - 1
+            axis:
+              - 8
+              - 8
+            marginx: 0
+            marginy: 0
+            imgWidth: 80
+            imgHeight: 16
+            width: 16
+            height: 16
+            offx: 0
+            offy: 0
+            origname: ibN1Lq24rM58KgL.png
+            shape: rect
+            left: 8
+            right: 8
+            top: 8
+            bottom: 8
+            uid: bN1Lq24rM58KgL
+            padding: 1
+            isBlank: false
+            source: 'C:\Users\Chico\Downloads\cobblestone-1.png'
+          - lastmod: 1771693684085
+            type: texture
+            name: cobblestone-2
+            untill: 0
+            grid:
+              - 5
+              - 1
+            axis:
+              - 8
+              - 8
+            marginx: 0
+            marginy: 0
+            imgWidth: 80
+            imgHeight: 16
+            width: 16
+            height: 16
+            offx: 0
+            offy: 0
+            origname: iHf8j6cTB6nhBFH.png
+            shape: rect
+            left: 8
+            right: 8
+            top: 8
+            bottom: 8
+            uid: Hf8j6cTB6nhBFH
+            padding: 1
+            isBlank: false
+            source: 'C:\Users\Chico\Downloads\cobblestone-2.png'
+          - lastmod: 1771693703860
+            type: texture
+            name: cobblestone-3
+            untill: 0
+            grid:
+              - 5
+              - 1
+            axis:
+              - 8
+              - 8
+            marginx: 0
+            marginy: 0
+            imgWidth: 80
+            imgHeight: 16
+            width: 16
+            height: 16
+            offx: 0
+            offy: 0
+            origname: i4tF8PPRqjN8hwh.png
+            shape: rect
+            left: 8
+            right: 8
+            top: 8
+            bottom: 8
+            uid: 4tF8PPRqjN8hwh
+            padding: 1
+            isBlank: false
+            source: 'C:\Users\Chico\Downloads\cobblestone-3.png'
+          - lastmod: 1771693718530
+            type: texture
+            name: cobblestone-4
+            untill: 0
+            grid:
+              - 5
+              - 1
+            axis:
+              - 8
+              - 8
+            marginx: 0
+            marginy: 0
+            imgWidth: 80
+            imgHeight: 16
+            width: 16
+            height: 16
+            offx: 0
+            offy: 0
+            origname: iNG2JT5FmB6Tbm8.png
+            shape: rect
+            left: 8
+            right: 8
+            top: 8
+            bottom: 8
+            uid: NG2JT5FmB6Tbm8
+            padding: 1
+            isBlank: false
+            source: 'C:\Users\Chico\Downloads\cobblestone-4.png'
+          - lastmod: 1771693732325
+            type: texture
+            name: cobblestone-5
+            untill: 0
+            grid:
+              - 5
+              - 1
+            axis:
+              - 8
+              - 8
+            marginx: 0
+            marginy: 0
+            imgWidth: 80
+            imgHeight: 16
+            width: 16
+            height: 16
+            offx: 0
+            offy: 0
+            origname: iQCnJqfhGBmNMjr.png
+            shape: rect
+            left: 8
+            right: 8
+            top: 8
+            bottom: 8
+            uid: QCnJqfhGBmNMjr
+            padding: 1
+            isBlank: false
+            source: 'C:\Users\Chico\Downloads\cobblestone-5.png'
+          - lastmod: 1771699095636
+            type: texture
+            name: cobblestone-6
+            untill: 0
+            grid:
+              - 5
+              - 1
+            axis:
+              - 8
+              - 8
+            marginx: 0
+            marginy: 0
+            imgWidth: 80
+            imgHeight: 16
+            width: 16
+            height: 16
+            offx: 0
+            offy: 0
+            origname: idFKQ2DCDWRtpmJ.png
+            shape: rect
+            left: 8
+            right: 8
+            top: 8
+            bottom: 8
+            uid: dFKQ2DCDWRtpmJ
+            padding: 1
+            isBlank: false
+            source: 'C:\Users\Chico\Downloads\cobblestone-6.png'
+          - lastmod: 1771693752524
+            type: texture
+            name: cobblestone-7
+            untill: 0
+            grid:
+              - 5
+              - 1
+            axis:
+              - 8
+              - 8
+            marginx: 0
+            marginy: 0
+            imgWidth: 80
+            imgHeight: 16
+            width: 16
+            height: 16
+            offx: 0
+            offy: 0
+            origname: iH8mbbRkcbJHLC3.png
+            shape: rect
+            left: 8
+            right: 8
+            top: 8
+            bottom: 8
+            uid: H8mbbRkcbJHLC3
+            padding: 1
+            isBlank: false
+            source: 'C:\Users\Chico\Downloads\cobblestone-7.png'
+          - lastmod: 1771693762127
+            type: texture
+            name: cobblestone-8
+            untill: 0
+            grid:
+              - 5
+              - 1
+            axis:
+              - 8
+              - 8
+            marginx: 0
+            marginy: 0
+            imgWidth: 80
+            imgHeight: 16
+            width: 16
+            height: 16
+            offx: 0
+            offy: 0
+            origname: ihW2bbWzFb4B1FC.png
+            shape: rect
+            left: 8
+            right: 8
+            top: 8
+            bottom: 8
+            uid: hW2bbWzFb4B1FC
+            padding: 1
+            isBlank: false
+            source: 'C:\Users\Chico\Downloads\cobblestone-8.png'
+          - lastmod: 1771693770684
+            type: texture
+            name: cobblestone-9
+            untill: 0
+            grid:
+              - 5
+              - 1
+            axis:
+              - 8
+              - 8
+            marginx: 0
+            marginy: 0
+            imgWidth: 80
+            imgHeight: 16
+            width: 16
+            height: 16
+            offx: 0
+            offy: 0
+            origname: i8W432pC4KPMtJQ.png
+            shape: rect
+            left: 8
+            right: 8
+            top: 8
+            bottom: 8
+            uid: 8W432pC4KPMtJQ
+            padding: 1
+            isBlank: false
+            source: 'C:\Users\Chico\Downloads\cobblestone-9.png'
+          - lastmod: 1771720590118
+            type: texture
+            name: fiery-grass
+            untill: 0
+            grid:
+              - 5
+              - 1
+            axis:
+              - 8
+              - 8
+            marginx: 0
+            marginy: 0
+            imgWidth: 80
+            imgHeight: 16
+            width: 16
+            height: 16
+            offx: 0
+            offy: 0
+            origname: iMRGWmhhDdL3gdt.png
+            shape: rect
+            left: 8
+            right: 8
+            top: 8
+            bottom: 8
+            uid: MRGWmhhDdL3gdt
+            padding: 1
+            isBlank: false
+            source: 'C:\Users\Chico\Downloads\fiery-grass.png'
+          - lastmod: 1771639495633
+            type: texture
+            name: grass-0
+            untill: 0
+            grid:
+              - 5
+              - 2
+            axis:
+              - 8
+              - 8
+            marginx: 0
+            marginy: 0
+            imgWidth: 80
+            imgHeight: 32
+            width: 16
+            height: 16
+            offx: 0
+            offy: 0
+            origname: iGNCCLJH7Q6NNRB.png
+            shape: rect
+            left: 8
+            right: 8
+            top: 8
+            bottom: 8
+            uid: GNCCLJH7Q6NNRB
+            padding: 1
+            isBlank: false
+            source: 'C:\Users\Chico\Downloads\grass.png'
+          - lastmod: 1771720602545
+            type: texture
+            name: grass-2
+            untill: 0
+            grid:
+              - 5
+              - 1
+            axis:
+              - 8
+              - 8
+            marginx: 0
+            marginy: 0
+            imgWidth: 80
+            imgHeight: 16
+            width: 16
+            height: 16
+            offx: 0
+            offy: 0
+            origname: iCmRFnKL6w43mH6.png
+            shape: rect
+            left: 8
+            right: 8
+            top: 8
+            bottom: 8
+            uid: CmRFnKL6w43mH6
+            padding: 1
+            isBlank: false
+            source: 'C:\Users\Chico\Downloads\grass-2.png'
+          - lastmod: 1771720615119
+            type: texture
+            name: grass-3
+            untill: 0
+            grid:
+              - 5
+              - 1
+            axis:
+              - 8
+              - 8
+            marginx: 0
+            marginy: 0
+            imgWidth: 80
+            imgHeight: 16
+            width: 16
+            height: 16
+            offx: 0
+            offy: 0
+            origname: iH3CKN9wc6BBNBQ.png
+            shape: rect
+            left: 8
+            right: 8
+            top: 8
+            bottom: 8
+            uid: H3CKN9wc6BBNBQ
+            padding: 1
+            isBlank: false
+            source: 'C:\Users\Chico\Downloads\grass-3.png'
+          - lastmod: 1771720836687
+            type: texture
+            name: grass-4
+            untill: 0
+            grid:
+              - 5
+              - 1
+            axis:
+              - 8
+              - 8
+            marginx: 0
+            marginy: 0
+            imgWidth: 80
+            imgHeight: 16
+            width: 16
+            height: 16
+            offx: 0
+            offy: 0
+            origname: i2WFhBPc7w3WjNk.png
+            shape: rect
+            left: 8
+            right: 8
+            top: 8
+            bottom: 8
+            uid: 2WFhBPc7w3WjNk
+            padding: 1
+            isBlank: false
+            source: 'C:\Users\Chico\Downloads\grass-4.png'
+          - lastmod: 1771720625652
+            type: texture
+            name: grass-ash
+            untill: 0
+            grid:
+              - 5
+              - 1
+            axis:
+              - 8
+              - 8
+            marginx: 0
+            marginy: 0
+            imgWidth: 80
+            imgHeight: 16
+            width: 16
+            height: 16
+            offx: 0
+            offy: 0
+            origname: i22FBqwNBFh1d13.png
+            shape: rect
+            left: 8
+            right: 8
+            top: 8
+            bottom: 8
+            uid: 22FBqwNBFh1d13
+            padding: 1
+            isBlank: false
+            source: 'C:\Users\Chico\Downloads\grass-ash.png'
+          - lastmod: 1771975590446
+            type: texture
+            name: grass-grayscale
+            untill: 0
+            grid:
+              - 5
+              - 2
+            axis:
+              - 8
+              - 8
+            marginx: 0
+            marginy: 0
+            imgWidth: 80
+            imgHeight: 32
+            width: 16
+            height: 16
+            offx: 0
+            offy: 0
+            origname: ihjgtqW7rgdgQtr.png
+            shape: rect
+            left: 8
+            right: 8
+            top: 8
+            bottom: 8
+            uid: hjgtqW7rgdgQtr
+            padding: 1
+            isBlank: false
+            source: 'C:\Users\Chico\Downloads\grass-grayscale.png'
+          - lastmod: 1771693779799
+            type: texture
+            name: ice-0
+            untill: 0
+            grid:
+              - 5
+              - 1
+            axis:
+              - 8
+              - 8
+            marginx: 0
+            marginy: 0
+            imgWidth: 80
+            imgHeight: 16
+            width: 16
+            height: 16
+            offx: 0
+            offy: 0
+            origname: iM87Pj4MCbMcpH6.png
+            shape: rect
+            left: 8
+            right: 8
+            top: 8
+            bottom: 8
+            uid: M87Pj4MCbMcpH6
+            padding: 1
+            isBlank: false
+            source: 'C:\Users\Chico\Downloads\ice-0.png'
+          - lastmod: 1771720637893
+            type: texture
+            name: pink-snow
+            untill: 0
+            grid:
+              - 5
+              - 1
+            axis:
+              - 8
+              - 8
+            marginx: 0
+            marginy: 0
+            imgWidth: 80
+            imgHeight: 16
+            width: 16
+            height: 16
+            offx: 0
+            offy: 0
+            origname: ih2hdfKj9pTCRjJ.png
+            shape: rect
+            left: 8
+            right: 8
+            top: 8
+            bottom: 8
+            uid: h2hdfKj9pTCRjJ
+            padding: 1
+            isBlank: false
+            source: 'C:\Users\Chico\Downloads\pink-snow.png'
+          - lastmod: 1771720650254
+            type: texture
+            name: pink-snow-2
+            untill: 0
+            grid:
+              - 5
+              - 1
+            axis:
+              - 8
+              - 8
+            marginx: 0
+            marginy: 0
+            imgWidth: 80
+            imgHeight: 16
+            width: 16
+            height: 16
+            offx: 0
+            offy: 0
+            origname: ip2dNhTGzJQgfMt.png
+            shape: rect
+            left: 8
+            right: 8
+            top: 8
+            bottom: 8
+            uid: p2dNhTGzJQgfMt
+            padding: 1
+            isBlank: false
+            source: 'C:\Users\Chico\Downloads\pink-snow-2.png'
+          - lastmod: 1771720660141
+            type: texture
+            name: snow
+            untill: 0
+            grid:
+              - 5
+              - 1
+            axis:
+              - 8
+              - 8
+            marginx: 0
+            marginy: 0
+            imgWidth: 80
+            imgHeight: 16
+            width: 16
+            height: 16
+            offx: 0
+            offy: 0
+            origname: iQbMhkFLF8bnhFc.png
+            shape: rect
+            left: 8
+            right: 8
+            top: 8
+            bottom: 8
+            uid: QbMhkFLF8bnhFc
+            padding: 1
+            isBlank: false
+            source: 'C:\Users\Chico\Downloads\snow.png'
+          - lastmod: 1771720668808
+            type: texture
+            name: snow-2
+            untill: 0
+            grid:
+              - 5
+              - 1
+            axis:
+              - 8
+              - 8
+            marginx: 0
+            marginy: 0
+            imgWidth: 80
+            imgHeight: 16
+            width: 16
+            height: 16
+            offx: 0
+            offy: 0
+            origname: i4hTPgKk29C9FGQ.png
+            shape: rect
+            left: 8
+            right: 8
+            top: 8
+            bottom: 8
+            uid: 4hTPgKk29C9FGQ
+            padding: 1
+            isBlank: false
+            source: 'C:\Users\Chico\Downloads\snow-2.png'
+          - lastmod: 1772227099665
+            type: texture
+            name: grass-5
+            untill: 0
+            grid:
+              - 5
+              - 1
+            axis:
+              - 8
+              - 8
+            marginx: 0
+            marginy: 0
+            imgWidth: 80
+            imgHeight: 16
+            width: 16
+            height: 16
+            offx: 0
+            offy: 0
+            origname: iHPCK4GK19KNJq8.png
+            shape: rect
+            left: 8
+            right: 8
+            top: 8
+            bottom: 8
+            uid: HPCK4GK19KNJq8
+            padding: 1
+            isBlank: false
+            source: 'C:\Users\Chico\Downloads\grass-5.png'
+          - lastmod: 1772227085026
+            type: texture
+            name: dirt
+            untill: 0
+            grid:
+              - 5
+              - 1
+            axis:
+              - 8
+              - 8
+            marginx: 0
+            marginy: 0
+            imgWidth: 80
+            imgHeight: 16
+            width: 16
+            height: 16
+            offx: 0
+            offy: 0
+            origname: i19tRmbNKMrwGjb.png
+            shape: rect
+            left: 8
+            right: 8
+            top: 8
+            bottom: 8
+            uid: 19tRmbNKMrwGjb
+            padding: 1
+            isBlank: false
+            source: 'C:\Users\Chico\Downloads\dirt.png'
+          - lastmod: 1772227092937
+            type: texture
+            name: grassy-dirt
+            untill: 0
+            grid:
+              - 5
+              - 1
+            axis:
+              - 8
+              - 8
+            marginx: 0
+            marginy: 0
+            imgWidth: 80
+            imgHeight: 16
+            width: 16
+            height: 16
+            offx: 0
+            offy: 0
+            origname: ipDWzc7FGrP75k5.png
+            shape: rect
+            left: 8
+            right: 8
+            top: 8
+            bottom: 8
+            uid: pDWzc7FGrP75k5
+            padding: 1
+            isBlank: false
+            source: 'C:\Users\Chico\Downloads\grassy-dirt.png'
+      - type: folder
+        uid: fLKjc3M6cgh1Fr
+        colorClass: text
+        icon: map
+        name: Backgrounds
+        lastmod: 1772204995981
+        entries:
+          - lastmod: 1772137463712
+            type: texture
+            name: Bg_Layer1
+            untill: 0
+            grid:
+              - 1
+              - 1
+            axis:
+              - 0
+              - 0
+            marginx: 0
+            marginy: 0
+            imgWidth: 2048
+            imgHeight: 2048
+            width: 2048
+            height: 2048
+            offx: 0
+            offy: 0
+            origname: i9Wjwj2QqPW8rWj.png
+            shape: rect
+            left: 0
+            right: 2048
+            top: 0
+            bottom: 2048
+            uid: 9Wjwj2QqPW8rWj
+            padding: 1
+            isBlank: false
+            source: >-
+              C:\Users\Chico\AppData\Local\ct.js\package.nw\bundledAssets\textures\Kenney's
+              Jumperpack\Bg_Layer1.png
+            tiled: true
+          - lastmod: 1772137464599
+            type: texture
+            name: Bg_Layer2
+            untill: 0
+            grid:
+              - 1
+              - 1
+            axis:
+              - 0
+              - 0
+            marginx: 0
+            marginy: 0
+            imgWidth: 2048
+            imgHeight: 2048
+            width: 2048
+            height: 2048
+            offx: 0
+            offy: 0
+            origname: irp3JF8DtLtHGLc.png
+            shape: rect
+            left: 0
+            right: 2048
+            top: 0
+            bottom: 2048
+            uid: rp3JF8DtLtHGLc
+            padding: 1
+            isBlank: false
+            source: >-
+              C:\Users\Chico\AppData\Local\ct.js\package.nw\bundledAssets\textures\Kenney's
+              Jumperpack\Bg_Layer2.png
+            tiled: true
+          - lastmod: 1772137465548
+            type: texture
+            name: Bg_Layer3
+            untill: 0
+            grid:
+              - 1
+              - 1
+            axis:
+              - 0
+              - 0
+            marginx: 0
+            marginy: 0
+            imgWidth: 2048
+            imgHeight: 2048
+            width: 2048
+            height: 2048
+            offx: 0
+            offy: 0
+            origname: ibcrBRzBTDjFRtn.png
+            shape: rect
+            left: 0
+            right: 2048
+            top: 0
+            bottom: 2048
+            uid: bcrBRzBTDjFRtn
+            padding: 1
+            isBlank: false
+            source: >-
+              C:\Users\Chico\AppData\Local\ct.js\package.nw\bundledAssets\textures\Kenney's
+              Jumperpack\Bg_Layer3.png
+            tiled: true
+          - lastmod: 1772137467248
+            type: texture
+            name: Bg_Layer4
+            untill: 0
+            grid:
+              - 1
+              - 1
+            axis:
+              - 0
+              - 0
+            marginx: 0
+            marginy: 0
+            imgWidth: 2048
+            imgHeight: 2048
+            width: 2048
+            height: 2048
+            offx: 0
+            offy: 0
+            origname: iCzHpt17DQcQ9gB.png
+            shape: rect
+            left: 0
+            right: 2048
+            top: 0
+            bottom: 2048
+            uid: CzHpt17DQcQ9gB
+            padding: 1
+            isBlank: false
+            source: >-
+              C:\Users\Chico\AppData\Local\ct.js\package.nw\bundledAssets\textures\Kenney's
+              Jumperpack\Bg_Layer4.png
+            tiled: true
+          - lastmod: 1771757066297
+            type: texture
+            name: MenuBackground
+            untill: 0
+            grid:
+              - 1
+              - 1
+            axis:
+              - 0
+              - 0
+            marginx: 0
+            marginy: 0
+            imgWidth: 978
+            imgHeight: 637
+            width: 978
+            height: 637
+            offx: 0
+            offy: 0
+            origname: iKQWh7FL9KPfqjN.png
+            shape: rect
+            left: 0
+            right: 978
+            top: 0
+            bottom: 637
+            uid: KQWh7FL9KPfqjN
+            padding: 1
+            isBlank: false
+            tiled: true
+      - type: folder
+        uid: 8BjGnQhgWwqJMN
+        colorClass: act
+        icon: help-circle
+        name: Misc
+        lastmod: 1772205056238
+        entries:
+          - lastmod: 1772140733558
+            type: texture
+            name: crack
+            untill: 0
+            grid:
+              - 3
+              - 1
+            axis:
+              - 8
+              - 8
+            marginx: 0
+            marginy: 0
+            imgWidth: 48
+            imgHeight: 16
+            width: 16
+            height: 16
+            offx: 0
+            offy: 0
+            origname: iH511TGT7hgPC3G.png
+            shape: rect
+            left: 8
+            right: 8
+            top: 8
+            bottom: 8
+            uid: H511TGT7hgPC3G
+            padding: 1
+            isBlank: false
+            source: 'C:\Users\Chico\Downloads\crack.png'
+          - lastmod: 1771634264371
+            type: texture
+            name: air
+            untill: 0
+            grid:
+              - 1
+              - 1
+            axis:
+              - 4
+              - 4
+            marginx: 0
+            marginy: 0
+            imgWidth: 8
+            imgHeight: 8
+            width: 8
+            height: 8
+            offx: 0
+            offy: 0
+            origname: ibTJGz5MJ2tfKpc.png
+            shape: rect
+            left: 1
+            right: 1
+            top: 1
+            bottom: 1
+            uid: bTJGz5MJ2tfKpc
+            padding: 1
+            isBlank: false
+            source: 'C:\Users\Chico\Downloads\air.png'
+          - lastmod: 1771615547979
+            type: texture
+            name: fire
+            untill: 0
+            grid:
+              - 1
+              - 1
+            axis:
+              - 4
+              - 4
+            marginx: 0
+            marginy: 0
+            imgWidth: 8
+            imgHeight: 8
+            width: 8
+            height: 8
+            offx: 0
+            offy: 0
+            origname: iTwtDgNmrrHPrFJ.png
+            shape: rect
+            left: 4
+            right: 4
+            top: 4
+            bottom: 4
+            uid: TwtDgNmrrHPrFJ
+            padding: 1
+            isBlank: false
+            source: 'C:\Users\Chico\Downloads\fire.png'
+          - lastmod: 1771256144101
+            type: texture
+            name: light_texture
+            untill: 0
+            grid:
+              - 1
+              - 1
+            axis:
+              - 64
+              - 64
+            marginx: 0
+            marginy: 0
+            imgWidth: 128
+            imgHeight: 128
+            width: 128
+            height: 128
+            offx: 0
+            offy: 0
+            origname: iHfkcKWQ52MFnDt.png
+            shape: rect
+            left: 64
+            right: 64
+            top: 64
+            bottom: 64
+            uid: HfkcKWQ52MFnDt
+            padding: 1
+            isBlank: false
+            source: 'C:\Users\Chico\Downloads\128x128 textures (93).png'
+      - type: folder
+        uid: 37rBjdJ5Pjcb1g
+        colorClass: error
+        icon: template
+        name: Entities
+        lastmod: 1772205079659
+        entries:
+          - lastmod: 1772140197578
+            type: texture
+            name: player
+            untill: 0
+            grid:
+              - 2
+              - 1
+            axis:
+              - 12
+              - 12
+            marginx: 0
+            marginy: 0
+            imgWidth: 48
+            imgHeight: 24
+            width: 24
+            height: 24
+            offx: 0
+            offy: 0
+            origname: iMr6hmJpk2RJH4J.png
+            shape: rect
+            left: 7
+            right: 7
+            top: 8
+            bottom: 12
+            uid: Mr6hmJpk2RJH4J
+            padding: 1
+            isBlank: false
+            source: 'C:\Users\Chico\Downloads\player.png'
+          - lastmod: 1771638254011
+            type: texture
+            name: ship
+            untill: 0
+            grid:
+              - 2
+              - 1
+            axis:
+              - 18
+              - 18
+            marginx: 0
+            marginy: 0
+            imgWidth: 72
+            imgHeight: 36
+            width: 36
+            height: 36
+            offx: 0
+            offy: 0
+            origname: i8TP7D46CqWK6Qc.png
+            shape: rect
+            left: 10
+            right: 10
+            top: 14
+            bottom: 8
+            uid: 8TP7D46CqWK6Qc
+            padding: 1
+            isBlank: false
+            source: 'C:\Users\Chico\Downloads\ship.png'
+      - type: folder
+        uid: qJf6FDDGB8r7dh
+        colorClass: warning
+        icon: button
+        name: Cursors
+        lastmod: 1772221192405
+        entries:
+          - lastmod: 1772221528510
+            type: texture
+            name: default
+            untill: 0
+            grid:
+              - 1
+              - 1
+            axis:
+              - 4
+              - 3
+            marginx: 0
+            marginy: 0
+            imgWidth: 16
+            imgHeight: 16
+            width: 16
+            height: 16
+            offx: 0
+            offy: 0
+            origname: ihH4j4H8Qdmgbg6.png
+            shape: rect
+            left: 2
+            right: 9
+            top: 2
+            bottom: 11
+            uid: hH4j4H8Qdmgbg6
+            padding: 1
+            isBlank: false
+            source: 'C:\Users\Chico\Downloads\cursors\tile_0027.png'
+          - lastmod: 1772222054317
+            type: texture
+            name: pointer
+            untill: 0
+            grid:
+              - 1
+              - 1
+            axis:
+              - 7
+              - 3
+            marginx: 0
+            marginy: 0
+            imgWidth: 16
+            imgHeight: 16
+            width: 16
+            height: 16
+            offx: 0
+            offy: 0
+            origname: ihhBCB3C4wrz5Ft.png
+            shape: rect
+            left: 3
+            right: 6
+            top: 1
+            bottom: 9
+            uid: hhBCB3C4wrz5Ft
+            padding: 1
+            isBlank: false
+            source: 'C:\Users\Chico\Downloads\cursors\tile_0157.png'
+  - type: folder
+    uid: hQ1tLLpPk9NbCt
+    colorClass: error
+    icon: airplay
+    name: Rooms
+    lastmod: 1771358762737
+    entries:
+      - type: room
+        oncreate: ''
+        onstep: ''
+        ondraw: ''
+        onleave: ''
+        gridX: 16
+        gridY: 16
+        diagonalGrid: false
+        disableGrid: false
+        simulate: true
+        width: 1280
+        height: 720
+        restrictCamera: false
+        restrictMaxX: 1280
+        restrictMinX: 0
+        restrictMaxY: 720
+        restrictMinY: 0
+        isUi: false
+        name: main
+        backgroundColor: '#000000'
+        follow: -1
+        backgrounds:
+          - depth: -10
+            texture: 9Wjwj2QqPW8rWj
+            shiftX: 0
+            shiftY: 0
+            parallaxX: 1
+            parallaxY: 1
+            movementX: 0
+            movementY: 0
+            scaleX: 1
+            scaleY: 1
+            repeat: repeat
+          - depth: -9
+            texture: rp3JF8DtLtHGLc
+            shiftX: 0
+            shiftY: -272
+            parallaxX: 1
+            parallaxY: 1
+            movementX: 0
+            movementY: 0
+            scaleX: 0.5
+            scaleY: 0.5
+            repeat: repeat-x
+          - depth: -8
+            texture: bcrBRzBTDjFRtn
+            shiftX: 0
+            shiftY: -280
+            parallaxX: 1
+            parallaxY: 1
+            movementX: 0
+            movementY: 0
+            scaleX: 0.5
+            scaleY: 0.5
+            repeat: repeat-x
+          - depth: -7
+            texture: CzHpt17DQcQ9gB
+            shiftX: 0
+            shiftY: -272
+            parallaxX: 1
+            parallaxY: 1
+            movementX: 0
+            movementY: 0
+            scaleX: 0.5
+            scaleY: 0.5
+            repeat: repeat-x
+        copies: []
+        tiles:
+          - depth: -1
+            tiles: []
+            extends:
+              cgroup: ''
+              matterMakeStatic: false
+              matterRestitution: 0
+              matterFriction: 0
+            hidden: false
+            cache: false
+        extends:
+          lightAmbientColor: '#FFFFFF'
+          matterGravity:
+            - 0
+            - 0
+        lastmod: 1772227961591
+        events:
+          - eventKey: OnRoomStart
+            code: >-
+              rooms.append('ui');
+
+              world = new World(this.matterEngine);
+
+
+              this.chunkBorders = world.drawChunkBorders(this);
+
+
+              this.blendMode = PIXI.BLEND_MODES.ADD;
+
+
+              const surfaceBounds =
+              world.getBiomeVerticalBounds(BiomeLayer.Surface, 0);
+
+
+              const { x, y } = world.getCoordByIndex(0, surfaceBounds.top - 1)
+
+
+              this.player = templates.copy('player', x, y);
+
+
+              this.debugGraphics = new PIXI.Graphics();
+
+              this.addChild(this.debugGraphics);
+            arguments: {}
+            lib: core
+          - eventKey: OnStep
+            code: |-
+              scripts.CameraUpdate();
+
+              this.debugGraphics.clear();
+              this.chunkBorders.clear()
+              if (isDebugMode) {
+                  this.chunkBorders = world.drawChunkBorders(this);
+
+                  this.debugGraphics.lineStyle(1, 0x0000ff);
+
+                  for (const body of Matter.Composite.allBodies(world.matterEngine.world)) {
+                      const vertices = body.vertices;
+                      this.debugGraphics.lineStyle(
+                          1,
+                          body.isStatic ? 0xff0000 : 0x00ff00
+                      );
+
+                      this.debugGraphics.moveTo(vertices[0].x, vertices[0].y);
+
+                      for (let j = 1; j < vertices.length; j++) {
+                          this.debugGraphics.lineTo(vertices[j].x, vertices[j].y);
+                      }
+
+                      this.debugGraphics.lineTo(vertices[0].x, vertices[0].y);
+                  }
+              }
+            arguments: {}
+            lib: core
+        behaviors: []
+        extendTypes: |-
+          matterEngine: Matter.Engine;
+          debug: boolean;
+        uid: 8KC2drKgPjctP8
+        lastPickedTileset: 8qdtJPc42NC6N5
+      - type: room
+        oncreate: ''
+        onstep: ''
+        ondraw: ''
+        onleave: ''
+        gridX: 64
+        gridY: 64
+        diagonalGrid: false
+        disableGrid: false
+        simulate: true
+        width: 1280
+        height: 720
+        restrictCamera: false
+        restrictMaxX: 1280
+        restrictMinX: 0
+        restrictMaxY: 720
+        restrictMinY: 0
+        isUi: true
+        name: ui
+        backgroundColor: '#000000'
+        follow: -1
+        backgrounds: []
+        copies:
+          - x: 16
+            'y': 16
+            opacity: 1
+            tint: 16777215
+            scale:
+              x: 1
+              'y': 1
+            rotation: 0
+            uid: dmjhq981DBCJ5H
+            exts: {}
+            customProperties: {}
+            bindings: {}
+        tiles: []
+        extends:
+          lightAmbientColor: '#ffffff'
+        lastmod: 1772226296100
+        events: []
+        behaviors: []
+        extendTypes: ''
+        uid: gtzKtRWJ42Nt2B
+      - type: room
+        oncreate: ''
+        onstep: ''
+        ondraw: ''
+        onleave: ''
+        gridX: 64
+        gridY: 64
+        diagonalGrid: false
+        disableGrid: false
+        simulate: true
+        width: 1280
+        height: 720
+        restrictCamera: false
+        restrictMaxX: 1280
+        restrictMinX: 0
+        restrictMaxY: 720
+        restrictMinY: 0
+        isUi: false
+        name: menu
+        backgroundColor: '#000000'
+        follow: -1
+        backgrounds:
+          - depth: 0
+            texture: KQWh7FL9KPfqjN
+            shiftX: -112
+            shiftY: -152
+            parallaxX: 1
+            parallaxY: 1
+            movementX: 0
+            movementY: 0
+            scaleX: 2
+            scaleY: 2
+            repeat: repeat
+        copies:
+          - x: 448
+            'y': 256
+            opacity: 1
+            tint: 16777215
+            scale:
+              x: 4
+              'y': 4
+            rotation: 0
+            uid: 9QQqNPkkB44HCw
+            exts: {}
+            customProperties: {}
+            bindings: {}
+        tiles: []
+        extends:
+          lightAmbientColor: '#ffffff'
+          matterGravity:
+            - 0
+            - 0
+        lastmod: 1771757702070
+        events: []
+        behaviors: []
+        extendTypes: ''
+        uid: L23W53H5w6nDPn
+      - lastmod: 1771757101538
+        type: texture
+        name: Menu_Button
+        untill: 0
+        grid:
+          - 1
+          - 1
+        axis:
+          - 0
+          - 0
+        marginx: 0
+        marginy: 0
+        imgWidth: 96
+        imgHeight: 32
+        width: 96
+        height: 32
+        offx: 0
+        offy: 0
+        origname: izmNm99h3Jk68HJ.png
+        shape: rect
+        left: 0
+        right: 96
+        top: 0
+        bottom: 32
+        uid: zmNm99h3Jk68HJ
+        padding: 1
+        isBlank: false
+        source: >-
+          C:\Users\Chico\AppData\Local\ct.js\package.nw\bundledAssets\textures\Dungeon
+          Crawler 16x16\Menu_Button.png
+      - lastmod: 1771757103098
+        type: texture
+        name: Menu_Button_Press
+        untill: 0
+        grid:
+          - 1
+          - 1
+        axis:
+          - 0
+          - 0
+        marginx: 0
+        marginy: 0
+        imgWidth: 96
+        imgHeight: 32
+        width: 96
+        height: 32
+        offx: 0
+        offy: 0
+        origname: iGCzRFdT5hJr5LG.png
+        shape: rect
+        left: 0
+        right: 96
+        top: 0
+        bottom: 32
+        uid: GCzRFdT5hJr5LG
+        padding: 1
+        isBlank: false
+        source: >-
+          C:\Users\Chico\AppData\Local\ct.js\package.nw\bundledAssets\textures\Dungeon
+          Crawler 16x16\Menu_Button_Press.png
+  - type: folder
+    uid: 9d53kG17pnjf4N
+    colorClass: success
+    icon: template
+    name: Templates
+    lastmod: 1771358773870
+    entries:
+      - type: template
+        baseClass: Text
+        name: debug-window
+        depth: 0
+        texture: -1
+        playAnimationOnStart: false
+        loopAnimation: true
+        animationFPS: 30
+        visible: true
+        events:
+          - eventKey: OnStep
+            lib: core
+            code: |-
+              Debug.update(this);
+              this.visible = isDebugMode;
+            arguments: {}
+          - eventKey: OnCreate
+            code: |-
+              Debug.init();
+
+              Debug.set("FPS", () => Math.round(pixiApp.ticker.FPS));
+            arguments: {}
+            lib: core
+        extends:
+          cgroup: ''
+          lightTexture@@texture: -1
+          lightColor: '#ffffff'
+          lightOpacity: false
+          lightScale: 0
+          matterEnable: false
+          matterStatic: false
+          matterSensor: false
+          matterDensity: 0
+          matterRestitution: 0
+          matterFriction: 0
+          matterFrictionStatic: 0
+          matterFrictionAir: 0
+          matterFixPivot:
+            - 0
+            - 0
+          matterConstraint: !<tag:yaml.org,2002:js/undefined> ''
+          matterRopeLength: 0
+          matterRopeStiffness: 0
+          matterRopeDamping: 0
+          cursorpointer: false
+        lastmod: 1772228001811
+        uid: dmjhq981DBCJ5H
+        behaviors: []
+        extendTypes: ''
+        defaultText: ''
+        textStyle: MgR3BRKpWWrGdw
+      - type: template
+        baseClass: AnimatedSprite
+        name: ship
+        depth: -1.5
+        texture: 8TP7D46CqWK6Qc
+        playAnimationOnStart: false
+        loopAnimation: true
+        animationFPS: 30
+        visible: true
+        events:
+          - eventKey: OnStep
+            lib: core
+            code: >-
+              if (!this.beingControlled) {
+                  return;
+              }
+
+
+              // const newBiome = map.getBiome(
+
+              //     Math.floor(this.x / map.cellSize),
+
+              //     Math.floor(this.y / map.cellSize)
+
+              // );
+
+
+              // if (this.currentBiome.id !== newBiome.id) {
+
+              //     if (this._biomeTransitionPromise) {
+
+              //         this._biomeTransitionPromise.stop();
+
+              //     }
+
+              //     this.currentBiome = newBiome;
+
+
+              //     tween.add({
+
+              //         obj: map.matterEngine.world.gravity,
+
+              //         fields: {
+
+              //             y: newBiome.gravity
+
+              //         },
+
+              //         duration: 800,
+
+              //         curve: tween.easeInOutQuad
+
+              //     });
+
+
+              //     const from = light.ambientColor;
+
+              //     const to = newBiome.ambientLight;
+
+
+              //     this._biomeTransition = {
+
+              //         t: 0,
+
+              //         from,
+
+              //         to
+
+              //     };
+
+
+              //     this._biomeTransitionPromise = tween.add({
+
+              //         obj: this._biomeTransition,
+
+              //         fields: {
+
+              //             t: 1
+
+              //         },
+
+              //         duration: 2000,
+
+              //         curve: tween.easeInOutCubic
+
+              //     });
+
+              // }
+
+
+              // if (this._biomeTransition) {
+
+              //     const { t, from, to } = this._biomeTransition;
+
+
+              //     const r1 = (from >> 16) & 0xff;
+
+              //     const g1 = (from >> 8) & 0xff;
+
+              //     const b1 = from & 0xff;
+
+
+              //     const r2 = (to >> 16) & 0xff;
+
+              //     const g2 = (to >> 8) & 0xff;
+
+              //     const b2 = to & 0xff;
+
+
+              //     const r = Math.round(r1 + (r2 - r1) * t);
+
+              //     const g = Math.round(g1 + (g2 - g1) * t);
+
+              //     const b = Math.round(b1 + (b2 - b1) * t);
+
+
+              //     light.ambientColor = (r << 16) | (g << 8) | b;
+
+
+              //     if (t >= 1) {
+
+              //         this._biomeTransition = null;
+
+              //     }
+
+              // }
+
+
+              const canLeaveShip =
+              Matter.Vector.magnitudeSquared(this.matterBody.velocity) < 0.1;
+
+
+              if (actions.Ternary.pressed && canLeaveShip) {
+                  this.beingControlled = false;
+                  templates.copy('player', this.x, this.y, { ship: this })
+                  this.currentFrame = 1;
+                  sounds.stop('compressedAir');
+                  sounds.stop('shipActive');
+                  return;
+              }
+
+
+              if ((actions.MoveY.down || actions.SecondaryMoveX.down) &&
+              !sounds.playing('compressedAir')) {
+                  sounds.play('compressedAir', {loop: true});
+              }
+
+
+              if (!actions.MoveY.down && !actions.SecondaryMoveX.down) {
+                  sounds.stop('compressedAir');
+              }
+
+
+              matter.push(
+                  this,
+                  actions.SecondaryMoveX.value * this.airControlPower,
+                  actions.MoveY.value * this.airControlPower,
+              );
+
+
+              if (actions.MoveX.down) {
+                  matter.spin(this, 0.7 * actions.MoveX.value);
+              }
+
+
+              if (actions.Thrust.pressed) {
+                  this.fireParticle.resume();
+                  sounds.play('shipActive', { loop: true });
+              } else if (actions.Thrust.released) {
+                  sounds.stop("shipActive")
+                  this.fireParticle.pause();
+              }
+
+
+              if (actions.Thrust.down) {
+                  let thrustForce = u.rotate(
+                      0,
+                      -this.thrustPower,
+                      this.angle
+                  );
+                  matter.push(
+                      this,
+                      thrustForce.x,
+                      thrustForce.y
+                  );
+              }
+            arguments: {}
+          - eventKey: OnCreate
+            code: >-
+              camera.follow = this;
+
+              Matter.Body.setMass(this.matterBody, 8);
+
+
+              this.light = light.add(
+                  res.getTexture('light_texture', 0),
+                  0, 0, {
+                    owner: this,
+                    scaleFactor: 3
+                  }
+              );
+
+
+              this.fireParticle = emitters.follow(this, 'rocketFire', {
+                  position: {x: 0, y: 14},
+                  depth: -1.6
+              })
+
+              this.fireParticle.pause();
+
+
+              this.beingControlled = true;
+
+
+              this.airControlPower = 0.0005;
+
+              this.thrustPower = 0.002;
+
+              this.shouldDamageTiles = false;
+
+
+              this.matterBody.collisionFilter = {
+                  category: COLLISION_CATEGORY_SHIP,
+                  mask: COLLISION_CATEGORY_WORLD
+              }
+
+
+              this.onCollisionStart = function(_: Matter.Body, pair:
+              Matter.IPair) {
+                  if (!this.shouldDamageTiles) {
+                      return
+                  }
+                  
+                  let test = pair.collision.supports[0];
+                  let normal = pair.collision.normal;
+
+                  world.damageTile(test.x - normal.x, test.y - normal.y, matter.getImpact(pair))
+                  sounds.play('impact');
+              };
+
+
+              this.playerEnteredShip = () => {
+                  this.beingControlled = true;
+                  camera.follow = this;
+                  this.currentFrame = 0;
+              }
+            arguments: {}
+            lib: core
+        extends:
+          cgroup: ''
+          matterEnable: true
+          matterStatic: false
+          matterSensor: false
+          matterDensity: 0.4
+          matterRestitution: 0
+          matterFriction: 0.05
+          matterFrictionStatic: 0
+          matterFrictionAir: 0.01
+          matterFixPivot:
+            - 0
+            - -2
+          matterConstraint: !<tag:yaml.org,2002:js/undefined> ''
+          matterRopeLength: 0
+          matterRopeStiffness: 0
+          matterRopeDamping: 0
+          lightTexture@@texture: -1
+          lightColor: '#ffffff'
+          lightOpacity: false
+          lightScale: 0
+        lastmod: 1772207992327
+        uid: LtRfC9N814gd1C
+        behaviors:
+          - pd8grnPh27DHL7
+        extendTypes: |-
+          matterBody: Matter.Body;
+          fireParticle: EmitterTandem;
+          airControlPower: number;
+          thrustPower: number;
+          beingControlled: boolean;
+          currentBiome: Biome;
+      - type: template
+        baseClass: AnimatedSprite
+        name: mouse-lamp
+        depth: 0
+        texture: -1
+        playAnimationOnStart: false
+        loopAnimation: true
+        animationFPS: 30
+        visible: true
+        events:
+          - eventKey: OnStep
+            lib: core
+            code: |-
+              // if (actions.Primary.down) {
+              //     this.
+              // }
+              this.x = pointer.x;
+              this.y = pointer.y;
+            arguments: {}
+          - eventKey: OnCreate
+            code: |-
+              this.light = light.add(
+                  res.getTexture('light_texture', 0),
+                  0, 0, {
+                      owner: this,
+                      tint: 0xFFFFFF,
+                  }
+              );
+            arguments: {}
+            lib: core
+        extends:
+          cgroup: ''
+          lightTexture@@texture: -1
+          lightColor: '#FFFFFF'
+          lightOpacity: false
+          lightScale: 1
+        lastmod: 1771258052483
+        uid: T237CtnwRJPhJg
+        behaviors: []
+        extendTypes: ''
+        blendMode: normal
+      - type: template
+        baseClass: AnimatedSprite
+        name: player
+        depth: -1.4
+        texture: Mr6hmJpk2RJH4J
+        playAnimationOnStart: false
+        loopAnimation: true
+        animationFPS: 8
+        visible: true
+        events:
+          - eventKey: OnStep
+            lib: core
+            code: |-
+              this.updateGrounded();
+
+              // const canEnterShip = u.distance(this, this.ship) < 10;
+
+              if (actions.Primary.down && u.distance(this, pointer) < 64) {
+                  world.damageTile(pointer.x, pointer.y, this.damagePerSecond * u.time);
+              }
+
+              if (actions.Secondary.down && u.distance(this, pointer) < 64) {
+                  world.changeTile(pointer.x, pointer.y, GRASS_1.id);
+              }
+
+              if (actions.Ternary.pressed) {
+                  // this.ship.playerEnteredShip();
+                  // this.kill = true;
+                  return;
+              }
+
+              let newWalkVelocity = this.matterBody.velocity.x;
+
+              if (actions.MoveX.down) {
+                  newWalkVelocity += actions.MoveX.value
+                                      * this.walkAcceleration
+                                      * (this.isGrounded ? 1 : this.airAccelerationRatio)
+                                      * u.time;
+              } else {
+                  newWalkVelocity -= newWalkVelocity * u.time * 7;
+                  if (Math.abs(newWalkVelocity) < 0.1) {
+                      newWalkVelocity = 0
+                  }
+              }
+
+              newWalkVelocity = u.clamp(
+                  -this.maxWalkVelocity,
+                  newWalkVelocity,
+                  this.maxWalkVelocity
+              );
+
+              Matter.Body.setVelocity(
+                  this.matterBody,
+                  {
+                      x: newWalkVelocity,
+                      y: this.matterBody.velocity.y
+                  }
+              );
+
+              if (actions.Thrust.pressed && this.isGrounded) {
+                  Matter.Body.setVelocity(
+                      this.matterBody,
+                      {
+                          x: this.matterBody.velocity.x,
+                          y: -this.jumpVelocity
+                      }
+                  );
+              }
+            arguments: {}
+          - eventKey: OnCreate
+            code: >
+              camera.follow = this;
+
+
+              lightSystem.addLight(this.x, this.y, 10, 0.8);
+
+
+              this.airAccelerationRatio = 0.5;
+
+              this.jumpVelocity = 4;
+
+              this.walkAcceleration = 3.6;
+
+              this.maxWalkVelocity = 1.6;
+
+
+              this.damagePerSecond = 1000;
+
+
+              this.isGrounded = false;
+
+              this.bodiesNear = [];
+
+
+              this.matterBody.restitution = 0;
+
+              Matter.Body.setMass(this.matterBody, 5);
+
+              Matter.Body.setInertia(this.matterBody, Infinity);
+
+
+              this.matterBody.collisionFilter = {
+                  category: COLLISION_CATEGORY_PLAYER,
+                  mask: COLLISION_CATEGORY_WORLD
+              }
+
+
+              this.updateGrounded = () => {
+                  const start = {
+                      x: this.x,
+                      y: this.y + this.height / 2
+                  };
+
+                  const end = {
+                      x: start.x,
+                      y: start.y + 2
+                  };
+
+                  this.bodiesNear = world.getBodiesNear(this.x / world.cellSize, this.y / world.cellSize);
+
+                  const hits = Matter.Query.ray(this.bodiesNear, start, end, 12);
+
+                  this.isGrounded = hits.length > 0;
+              };
+
+
+              Debug.set("Player X", () => this.x.toFixed(2));
+
+              Debug.set("Player Y", () => this.y.toFixed(2));
+
+              Debug.set("Player Velocity X", () =>
+              this.matterBody.velocity.x.toFixed(2));
+
+              Debug.set("Player Velocity Y", () =>
+              this.matterBody.velocity.y.toFixed(2));
+            arguments: {}
+            lib: core
+          - eventKey: OnDraw
+            code: |-
+              if (this.matterBody.velocity.x > 0) {
+                  this.scale.x = -1;
+              } else if (this.matterBody.velocity.x < 0) {
+                  this.scale.x = 1;
+              }
+
+              if (!this.isGrounded) {
+                  this.gotoAndStop(1);
+                  return;
+              }
+
+              if (Math.abs(this.matterBody.velocity.x) > 0.1) {
+                  this.play();
+              } else {
+                  this.gotoAndStop(0);
+              }
+            arguments: {}
+            lib: core
+        extends:
+          cgroup: ''
+          matterEnable: true
+          matterStatic: false
+          matterSensor: false
+          matterDensity: 0.2
+          matterRestitution: 0
+          matterFriction: 0
+          matterFrictionStatic: 0
+          matterFrictionAir: 0.02
+          matterFixPivot:
+            - 0
+            - 2
+          matterConstraint: !<tag:yaml.org,2002:js/undefined> ''
+          matterRopeLength: 0
+          matterRopeStiffness: 0
+          matterRopeDamping: 0
+          lightTexture@@texture: HfkcKWQ52MFnDt
+          lightColor: '#ffffff'
+          lightOpacity: false
+          lightScale: 0
+          cursorpointer: false
+        lastmod: 1772210132656
+        uid: HbdjfWPTmMR79j
+        behaviors:
+          - pd8grnPh27DHL7
+        extendTypes: |
+          matterBody: Matter.Body;
+          updateGrounded: () => void;
+          isGrounded: boolean;
+          airAccelerationRatio: number;
+          jumpVelocity: number;
+          maxWalkVelocity: number;
+          walkAcceleration: number;
+          bodiesNear: Matter.Body[];
+      - type: template
+        baseClass: Button
+        name: button
+        depth: 0
+        texture: zmNm99h3Jk68HJ
+        playAnimationOnStart: false
+        loopAnimation: true
+        animationFPS: 30
+        visible: true
+        events:
+          - eventKey: OnPointerClick
+            code: rooms.switch('main');
+            arguments: {}
+            lib: core
+        extends:
+          cgroup: ''
+          lightTexture@@texture: -1
+          lightColor: '#ffffff'
+          lightOpacity: false
+          lightScale: 0
+          matterEnable: false
+          matterStatic: false
+          matterSensor: false
+          matterDensity: 0
+          matterRestitution: 0
+          matterFriction: 0
+          matterFrictionStatic: 0
+          matterFrictionAir: 0
+          matterFixPivot:
+            - 0
+            - 0
+          matterConstraint: !<tag:yaml.org,2002:js/undefined> ''
+          matterRopeLength: 0
+          matterRopeStiffness: 0
+          matterRopeDamping: 0
+        lastmod: 1772205696473
+        uid: 9QQqNPkkB44HCw
+        behaviors: []
+        extendTypes: ''
+        defaultText: Play
+        textStyle: 56hCntp79pncQz
+        nineSliceSettings:
+          top: 16
+          left: 16
+          bottom: 16
+          right: 16
+          autoUpdate: false
+        hoverTexture: -1
+        pressedTexture: GCzRFdT5hJr5LG
+        disabledTexture: -1
+      - type: folder
+        uid: ndMdGtCcb6gg6D
+        colorClass: success
+        icon: behavior
+        name: Behaviors
+        lastmod: 1772205621716
+        entries:
+          - type: behavior
+            name: custom-gravity
+            behaviorType: template
+            events:
+              - eventKey: OnCreate
+                code: >-
+                  const { worldX, worldY } = world.getWorldIndex(this.x,
+                  this.y);
+
+
+                  this.currentBiome = world.getBiome(worldX, worldY);
+
+                  this.localGravity = this.currentBiome.localGravity;
+                arguments: {}
+                lib: core
+              - eventKey: OnStep
+                code: >-
+                  Matter.Body.applyForce(this.matterBody,
+                  this.matterBody.position, {
+                      x: 0,
+                      y: this.localGravity
+                  });
+                arguments: {}
+                lib: core
+            specification: []
+            extendTypes: |-
+              currentBiome: Biome;
+              localGravity: number;
+              matterBody: Matter.Body;
+            lastmod: 1772207813872
+            uid: pd8grnPh27DHL7
+      - type: template
+        baseClass: AnimatedSprite
+        name: cursor
+        depth: 5
+        texture: hH4j4H8Qdmgbg6
+        playAnimationOnStart: false
+        loopAnimation: true
+        animationFPS: 30
+        visible: true
+        events:
+          - eventKey: OnStep
+            lib: core
+            code: |
+              this.x = pointer.xui;
+              this.y = pointer.yui;
+            arguments: {}
+        extends:
+          cgroup: ''
+          matterConstraint: !<tag:yaml.org,2002:js/undefined> ''
+          matterRopeLength: 0
+          matterRopeStiffness: 0
+          matterRopeDamping: 0
+          matterEnable: false
+          matterStatic: false
+          matterSensor: false
+          matterDensity: 0
+          matterRestitution: 0
+          matterFriction: 0
+          matterFrictionStatic: 0
+          matterFrictionAir: 0
+          matterFixPivot:
+            - 0
+            - 0
+        lastmod: 1772223610766
+        uid: 6g8CzQhnJ65tkp
+        behaviors: []
+        extendTypes: ''
+  - type: folder
+    uid: p9DchCCMDrmQkb
+    colorClass: text
+    icon: font
+    name: Fonts
+    lastmod: 1772141597162
+    entries:
+      - name: BoldPixels
+        type: typeface
+        fonts:
+          - weight: '700'
+            italic: false
+            uid: z8DH943D9mN84F
+            origname: BoldPixels
+        lastmod: 1772205167934
+        bitmapFont: false
+        bitmapFontSize: 16
+        bitmapFontLineHeight: 18
+        bitmapPrecision: false
+        charsets:
+          - allInFont
+        customCharset: ''
+        uid: b6L1JB69rr2MjG
+      - type: folder
+        uid: QGrf1w42rr9KLq
+        colorClass: text
+        icon: special-fonts
+        name: Styles
+        lastmod: 1772205118407
+        entries:
+          - type: style
+            name: bold-pixels-large
+            uid: 56hCntp79pncQz
+            typeface: b6L1JB69rr2MjG
+            font:
+              family: sans-serif
+              halign: center
+              italic: false
+              size: 64
+              weight: '700'
+              wrap: false
+              wrapPosition: 640
+              lineHeight: 60
+            lastmod: 1772205443462
+            stroke:
+              color: '#000000'
+              weight: 8
+            fill:
+              type: '0'
+          - type: style
+            name: bold-pixels-small
+            uid: gJL37qWDnqJF42
+            typeface: b6L1JB69rr2MjG
+            font:
+              family: sans-serif
+              halign: center
+              italic: false
+              size: 16
+              weight: '700'
+              wrap: false
+              wrapPosition: 640
+              lineHeight: 21
+            fill:
+              type: 0
+              color: '#ffffff'
+              color1: '#cccccc'
+              color2: '#ffffff'
+              gradtype: 1
+            lastmod: 1772206220709
+            stroke:
+              color: '#000000'
+              weight: 4
+          - type: style
+            name: bold-pixels-medium
+            uid: MbnMJMg1CkGddB
+            typeface: b6L1JB69rr2MjG
+            font:
+              family: sans-serif
+              halign: center
+              italic: false
+              size: 32
+              weight: '700'
+              wrap: false
+              wrapPosition: 640
+              lineHeight: 42
+            fill:
+              type: 0
+              color: '#ffffff'
+              color1: '#cccccc'
+              color2: '#ffffff'
+              gradtype: 1
+            lastmod: 1772205520071
+            stroke:
+              color: '#000000'
+              weight: 8
+          - type: style
+            name: monogram
+            uid: MgR3BRKpWWrGdw
+            typeface: n5B3MTpKkwkLLR
+            font:
+              family: sans-serif
+              halign: left
+              italic: false
+              size: 24
+              weight: '400'
+              wrap: false
+              wrapPosition: 640
+              lineHeight: 18
+            fill:
+              type: 0
+              color: '#ffffff'
+              color1: '#cccccc'
+              color2: '#ffffff'
+              gradtype: 1
+            lastmod: 1772227998800
+      - name: monogram
+        type: typeface
+        fonts:
+          - weight: '400'
+            italic: false
+            uid: q8n3Gmb4b3wR9r
+            origname: monogram
+        lastmod: 1772206323607
+        bitmapFont: false
+        bitmapFontSize: 16
+        bitmapFontLineHeight: 18
+        bitmapPrecision: false
+        charsets:
+          - allInFont
+        customCharset: ''
+        uid: n5B3MTpKkwkLLR
+  - type: folder
+    uid: kjkMkpkhpdj5WH
+    colorClass: act
+    icon: volume-2
+    name: Sounds
+    lastmod: 1772141674467
+    entries:
+      - name: compressedAir
+        uid: g18B7k3F6TTr5J
+        type: sound
+        lastmod: 1771756582034
+        preload: true
+        variants:
+          - uid: 2pJ333p34qQ8R2
+            source: 'C:\Users\Chico\Downloads\compressed_gas_leak.ogg'
+        distortion:
+          enabled: false
+          min: 0
+          max: 1
+        pitch:
+          enabled: false
+          min: 0
+          max: 0.58
+        reverb:
+          enabled: false
+          decayMin: 2
+          decayMax: 2
+          secondsMin: 2
+          secondsMax: 3
+          reverse: false
+        volume:
+          enabled: true
+          min: 0
+          max: 0.45
+        eq:
+          enabled: false
+          bands:
+            - min: -1
+              max: 1
+            - min: -1
+              max: 1
+            - min: -1
+              max: 1
+            - min: -1
+              max: 1
+            - min: -1
+              max: 1
+            - min: -1
+              max: 1
+            - min: -1
+              max: 1
+            - min: -1
+              max: 1
+            - min: -1
+              max: 1
+            - min: -1
+              max: 1
+        panning:
+          refDistance: 0.5
+          rolloffFactor: 1
+      - name: impact
+        uid: PQ85k38R3kqtJm
+        type: sound
+        lastmod: 1771755755929
+        preload: true
+        variants:
+          - uid: K7rNTt63cNDNL4
+            source: 'C:\Users\Chico\Downloads\424911-impactshort78.wav'
+        distortion:
+          enabled: false
+          min: 0
+          max: 1
+        pitch:
+          enabled: false
+          min: 0
+          max: 1
+        reverb:
+          enabled: false
+          decayMin: 2
+          decayMax: 2
+          secondsMin: 0
+          secondsMax: 0.69
+          reverse: false
+        volume:
+          enabled: false
+          min: 0
+          max: 1
+        eq:
+          enabled: false
+          bands:
+            - min: -1
+              max: 1
+            - min: -1
+              max: 1
+            - min: -1
+              max: 1
+            - min: -1
+              max: 1
+            - min: -1
+              max: 1
+            - min: -1
+              max: 1
+            - min: -1
+              max: 1
+            - min: -1
+              max: 1
+            - min: -1
+              max: 1
+            - min: -1
+              max: 1
+        panning:
+          refDistance: 0.5
+          rolloffFactor: 1
+      - name: shipActive
+        uid: F23prcb2Qqczmh
+        type: sound
+        lastmod: 1771756249592
+        preload: true
+        variants:
+          - uid: Nh1TWWQBN1Fbn2
+            source: 'C:\Users\Chico\Downloads\rocket_engine.001.wav'
+        distortion:
+          enabled: false
+          min: 0
+          max: 1
+        pitch:
+          enabled: false
+          min: 0.67
+          max: 1.41
+        reverb:
+          enabled: false
+          decayMin: 2
+          decayMax: 2
+          secondsMin: 2
+          secondsMax: 3
+          reverse: false
+        volume:
+          enabled: false
+          min: 0
+          max: 1
+        eq:
+          enabled: false
+          bands:
+            - min: -1
+              max: 1
+            - min: -1
+              max: 1
+            - min: -1
+              max: 1
+            - min: -1
+              max: 1
+            - min: -1
+              max: 1
+            - min: -1
+              max: 1
+            - min: -1
+              max: 1
+            - min: -1
+              max: 1
+            - min: -1
+              max: 1
+            - min: -1
+              max: 1
+        panning:
+          refDistance: 0.5
+          rolloffFactor: 1
+  - type: folder
+    uid: ftpB9TkKFD3472
+    colorClass: warning
+    icon: sparkles
+    name: Emmiters
+    lastmod: 1772204934572
+    entries:
+      - name: airJets
+        uid: 6Mm7Br9FMB95TN
+        emitters:
+          - uid: 1djqJgCMjRRwKj
+            texture: bTJGz5MJ2tfKpc
+            openedTabs:
+              - shape
+            textureBehavior: textureRandom
+            animatedSingleFramerate: 30
+            settings:
+              delay: 0
+              lifetime:
+                min: 0.1
+                max: 0.2
+              frequency: 0.01
+              spawnChance: 1
+              particlesPerWave: 1
+              emitterLifetime: 0
+              maxParticles: 901
+              maxSpeed: 0
+              pos:
+                x: 0
+                'y': 0
+              addAtBack: false
+              behaviors:
+                - type: alpha
+                  config:
+                    alpha:
+                      list:
+                        - value: 0.9800244497676907
+                          time: 0
+                        - value: 0.9750243250239778
+                          time: 1
+                - type: color
+                  config:
+                    color:
+                      list:
+                        - value: ffffff
+                          time: 0
+                        - value: ffffff
+                          time: 1
+                - type: blendMode
+                  config:
+                    blendMode: normal
+                - type: scale
+                  config:
+                    scale:
+                      list:
+                        - value: 0.5
+                          time: 0
+                        - value: 0.5
+                          time: 1
+                      isStepped: false
+                    minMult: 0.18
+                - type: moveAcceleration
+                  config:
+                    minStart: 0
+                    maxStart: 0
+                    accel:
+                      x: 0
+                      'y': 0
+                    rotate: false
+                    maxSpeed: 3000
+                - type: spawnShape
+                  config:
+                    type: rect
+                    data:
+                      x: -1
+                      'y': -1
+                      w: 2
+                      h: 2
+                - type: rotation
+                  config:
+                    minStart: -15
+                    maxStart: 15
+                    minSpeed: 0
+                    maxSpeed: 0
+                    accel: 0
+        lastmod: 1771634960467
+        type: tandem
+      - name: rocketFire
+        uid: gJBp954NDGb2Fk
+        emitters:
+          - uid: hzb4bHcWFw5Q93
+            texture: TwtDgNmrrHPrFJ
+            openedTabs:
+              - spawning
+              - velocity
+              - rotation
+              - texture
+            textureBehavior: textureRandom
+            animatedSingleFramerate: 30
+            settings:
+              delay: 0
+              lifetime:
+                min: 0.4
+                max: 0.6
+              frequency: 0.05
+              spawnChance: 1
+              particlesPerWave: 1
+              emitterLifetime: 0
+              maxParticles: 50
+              maxSpeed: 0
+              pos:
+                x: 0
+                'y': 0
+              addAtBack: false
+              behaviors:
+                - type: alpha
+                  config:
+                    alpha:
+                      list:
+                        - value: 0.9650240755365525
+                          time: 0
+                        - value: 0.9500237013054144
+                          time: 1
+                - type: color
+                  config:
+                    color:
+                      list:
+                        - value: ffffff
+                          time: 0
+                        - value: ffffff
+                          time: 1
+                - type: blendMode
+                  config:
+                    blendMode: normal
+                - type: scale
+                  config:
+                    scale:
+                      list:
+                        - value: 1
+                          time: 0
+                        - value: 0.509992764864663
+                          time: 1
+                    minMult: 1
+                - type: moveAcceleration
+                  config:
+                    minStart: 8
+                    maxStart: 16
+                    accel:
+                      x: 0
+                      'y': 0
+                    rotate: false
+                    maxSpeed: 3000
+                - type: spawnShape
+                  config:
+                    type: torus
+                    data:
+                      x: 0
+                      'y': 0
+                      radius: 9
+                      innerRadius: 1
+                      rotation: true
+                      affectRotation: false
+                - type: rotation
+                  config:
+                    minStart: -20
+                    maxStart: 20
+                    minSpeed: 0
+                    maxSpeed: 0
+                    accel: 0
+            showShapeVisualizer: true
+        lastmod: 1771615565741
+        type: tandem
+  - type: folder
+    uid: 1Jrd53t6GPn1Rd
+    colorClass: text
+    icon: code
+    name: Scripts
+    lastmod: 1772220246750
+    entries:
+      - uid: cP1L6zRbJTKt62
+        name: CameraUpdate
+        code: |-
+          if (actions.Zoom.pressed) {
+              camera.scale.x += -actions.Zoom.value * 0.4;
+              camera.scale.x = u.clamp(0.25, camera.scale.x, 2.5);
+
+              camera.scale.y = camera.scale.x;
+          }
+
+          if (actions.DebugToggle.pressed) {
+              isDebugMode = !isDebugMode;
+          }
+
+          lightSystem.update(pixiApp);
+          world.updateChunkVisibility(camera.getBounds());
+        language: typescript
+        variables: []
+        runAutomatically: false
+        lastmod: 1772228166625
+        type: script
+globalVars: []
+settings:
+  authoring:
+    author: ''
+    site: ''
+    title: ''
+    version:
+      - 0
+      - 0
+      - 0
+    versionPostfix: ''
+    appId: ''
+  rendering:
+    usePixiLegacy: true
+    transparent: false
+    maxFPS: 60
+    pixelatedrender: true
+    highDensity: true
+    desktopMode: maximized
+    hideCursor: false
+    mobileScreenOrientation: landscape
+    viewMode: fastScale
+  export:
+    showErrors: true
+    errorsLink: ''
+    autocloseDesktop: true
+    windows: true
+    linux: true
+    mac: true
+    functionWrap: false
+    codeModifier: none
+    bundleAssetTree: false
+    bundleAssetTypes:
+      texture: true
+      template: true
+      room: true
+      behavior: false
+      typeface: false
+      sound: false
+      style: false
+      tandem: false
+      script: false
+      enum: false
+  branding:
+    accent: '#000000'
+    invertPreloaderScheme: true
+    icon: -1
+    splashScreen: -1
+    forceSmoothIcons: false
+    forceSmoothSplashScreen: false
+    hideLoadingLogo: true
+    alternativeLogo: false
+    customLoadingText: ''
+  fps: 30
+palette: []
