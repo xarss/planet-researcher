@@ -1,19 +1,23 @@
-# Strange Caves
+# Planet Researcher
 
 Made with [ct.js](https://ctjs.rocks/).
+You can open this project in ct.js by downloading this repo or the exported version in the releases.
 
-Strange Caves is a procedural exploration game originally created for the [**2026.1 Brackeys Game Jam (Brackeys 15)**](https://itch.io/jam/brackeys-15).
+Planet Researcher is a procedural exploration game originally created for the [**2026.1 Brackeys Game Jam (Brackeys 15)**](https://itch.io/jam/brackeys-15) with the name Strange Caves.
 
 The initial jam version was developed in a week and published on itch.io as a small experimental prototype.
 
 🔗 Initial Jam Version:
-[https://chicobento.itch.io/strange-caves](https://chicobento.itch.io/strange-caves) *(Coming Soon — updated version in development)*
+[https://chicobento.itch.io/strange-caves](https://chicobento.itch.io/strange-caves)
+
+🔗 Current Version:
+[https://chicobento.itch.io/planet-researcher](https://chicobento.itch.io/planet-researcher)
 
 ---
 
 ## About The Project
 
-Strange Caves began as a short game jam entry focused on procedural cave generation and exploration. After the jam ended, I decided to continue developing the project.
+Planet Researcher began as a short game jam entry focused on procedural cave generation and exploration. After the jam ended, I decided to continue developing the project.
 
 The game is evolving into a research-driven exploration experience centered around:
 
@@ -50,11 +54,11 @@ The project is being developed as both a game and an engine architecture experim
 
 ## Future Plans
 
-* Light System from scratch
-* Inventory, Crafting, building systems
-* Interactive UI to see temperature, gravity, humidity, oxigen levels, air pressure.
-* A gameplay loop (since the game jam version is only exploring)
-* Additional procedural features (vegetation, minerals, procedural structures)
-* Research and Survival aspects
-* New vehicles
-* Block, liquid and rope physics
+ - [x] Light System from scratch
+ - [ ] Inventory, Crafting, building systems
+ - [ ] Interactive UI to see temperature, gravity, humidity, oxigen levels, air pressure.
+ - [ ] A gameplay loop (since the game jam version is only exploring)
+ - [ ] Additional procedural features (vegetation, minerals, procedural structures)
+ - [ ] Research and Survival aspects
+ - [ ] New vehicles
+ - [ ] Block, liquid and rope physics

@@ -4954,15 +4954,15 @@ assets:
 globalVars: []
 settings:
   authoring:
-    author: ''
-    site: ''
-    title: ''
+    author: chico
+    site: 'https://chicobento.itch.io/'
+    title: chico
     version:
       - 0
+      - 1
       - 0
-      - 0
-    versionPostfix: ''
-    appId: ''
+    versionPostfix: pre
+    appId: planet.researcher
   rendering:
     usePixiLegacy: true
     transparent: false
