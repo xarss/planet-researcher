@@ -20,7 +20,11 @@ libs:
   matter:
     matterUseStaticDeltaTime: true
   tween: {}
-startroom: L23W53H5w6nDPn
+  akatemplate:
+    toptop: ' '
+    botbot: ' <script src="https://cdn.jsdelivr.net/npm/pixi-filters@latest/dist/browser/pixi-filters.min.js"></script>'
+    csscss: ' '
+startroom: 8KC2drKgPjctP8
 contentTypes: []
 actions:
   - name: MoveX
@@ -49,10 +53,11 @@ actions:
       - code: gamepad.Down
       - code: gamepad.LStickY
       - code: vkeys.Vjoy1Y
-  - name: Zoom
+  - name: Scroll
     methods:
       - code: pointer.DeltaPinch
       - code: pointer.Wheel
+        multiplier: -1
   - name: Primary
     methods:
       - code: pointer.Primary
@@ -73,6 +78,16 @@ actions:
   - name: Ternary
     methods:
       - code: keyboard.KeyF
+  - name: Extra
+    methods:
+      - code: keyboard.ShiftLeft
+      - code: keyboard.ShiftRight
+  - name: ToggleInventory
+    methods:
+      - code: keyboard.KeyE
+  - name: Close
+    methods:
+      - code: keyboard.Escape
 scripts:
   - name: util
     code: |-
@@ -146,6 +161,9 @@ scripts:
           const heightSharpness = 1 / 50000;
           return Math.exp(-Math.pow(difference, 2) * heightSharpness) * weight;
       }
+
+      type DebugValue = any | (() => any);
+      type Tilemap = ReturnType<typeof tilemaps.create>;
   - name: enums
     code: |-
       enum BiomeLayer {
@@ -153,6 +171,25 @@ scripts:
           Surface,
           Underground,
           Deepts,
+      }
+
+      enum UiType {
+          Panel,
+          Outline,
+          Frame,
+          Hole,
+          Button,
+          ButtonActive
+      }
+
+      const styleSheetColumns = 6;
+      const styleSheetRows = 5;
+      const styleSheetName = "ui";
+
+      function getUiTexture(index: number, uiType: UiType): CtjsTexture  {
+          const frame = index * styleSheetColumns + uiType;
+          
+          return res.getTexture(styleSheetName, frame);
       }
   - name: interfaces
     code: |-
@@ -193,10 +230,54 @@ scripts:
           dirtyPhysics?: boolean;
           dirtyDamage?: boolean;
       };
-  - name: types
+  - name: classes
     code: |-
-      type DebugValue = any | (() => any);
-      type Tilemap = ReturnType<typeof tilemaps.create>;
+      type ItemOptions = {
+          name: string;
+          readableName: string;
+          textureIndex: number;
+          stackSize?: number;
+      }
+
+      class Item {
+          private static registry: Map<number, Item> = new Map<number, Item>();
+          private static nextId: number = 1;
+
+          id: number;
+          name: string;
+          readableName: string;
+          textureIndex: number;
+          stackSize: number;
+
+          constructor(options: ItemOptions) {
+              const {
+                  name,
+                  textureIndex,
+                  readableName,
+                  stackSize = 99
+              } = options;
+
+              this.id = Item.nextId++;
+              this.name = name;
+              this.readableName = readableName;
+              this.stackSize = stackSize;
+              this.textureIndex = textureIndex;
+
+              Item.registry.set(this.id, this);
+          }
+
+          static get(id: number): Item {
+              return Item.registry.get(id);
+          }
+
+          static has(id: number): boolean {
+              return Item.registry.has(id);
+          }
+
+          update() {}
+          onEnterHand() {}
+          onLeaveHand() {}
+      }
 
       type BlockOptions = {
           name: string;
@@ -209,36 +290,6 @@ scripts:
           maxHp?: number;
       }
 
-      type BiomeOptions = {
-          name: string;
-          layer: BiomeLayer;
-          definition: BiomeDefinition;
-          localGravity?: number;
-          fillPercent?: number;
-          ambientLight?: number;
-          rules?: BiomeBlockRule[];
-          backgroundRules?: BiomeBlockRule[];
-      }
-
-      type BiomeDefinitionOptions = {
-          idealTemperature: number;
-          idealHumidity: number;
-          temperatureWeight?: number;
-          humidityWeight?: number;
-      }
-
-      type LayerDefinition = {
-          id: BiomeLayer;
-          baseTop: number;
-          noise: NoiseMap;
-      };
-
-      type GameMapOptions = {
-          cellSize?: number;
-          seed?: string;
-      }
-  - name: classes
-    code: |-
       class Block {
           private static registry: Map<number, Block> = new Map<number, Block>();
           private static nextId: number = 1;
@@ -282,6 +333,30 @@ scripts:
               return Block.registry.get(id);
           }
       }
+
+      type BiomeOptions = {
+          name: string;
+          layer: BiomeLayer;
+          definition: BiomeDefinition;
+          localGravity?: number;
+          fillPercent?: number;
+          ambientLight?: number;
+          rules?: BiomeBlockRule[];
+          backgroundRules?: BiomeBlockRule[];
+      }
+
+      type BiomeDefinitionOptions = {
+          idealTemperature: number;
+          idealHumidity: number;
+          temperatureWeight?: number;
+          humidityWeight?: number;
+      }
+
+      type LayerDefinition = {
+          id: BiomeLayer;
+          baseTop: number;
+          noise: NoiseMap;
+      };
 
       class Biome {
           private static registry: Map<number, Biome> = new Map<number, Biome>();
@@ -453,6 +528,55 @@ scripts:
               return (total + 1) / 2;
           }
       }
+  - name: items
+    code: |
+      class PistolItem extends Item {
+          damagePerSecond: number = 1000;
+          isBuildMode: boolean = false;
+
+          update() {
+              if (actions.Primary.down) {
+                  if (this.isBuildMode) {
+                      world.changeBlock(pointer.x, pointer.y, DIRT.id);
+                  } else {
+                      world.damageBlock(pointer.x, pointer.y, this.damagePerSecond * u.time);
+                  }
+              }
+
+              if (actions.Secondary.down) {
+                  if (this.isBuildMode) {
+                      world.changeBackgroundBlock(pointer.x, pointer.y, DIRT.id);
+                  } else {
+                      world.damageBackgroundBlock(pointer.x, pointer.y, this.damagePerSecond * u.time);
+                  }
+              }
+
+              if (actions.Ternary.pressed) {
+                  this.isBuildMode = !this.isBuildMode;
+              }
+          }
+      }
+
+      const PISTOL = new PistolItem({
+          name: "PISTOL",
+          textureIndex: 0,
+          readableName: "Pistol",
+          stackSize: 1
+      })
+
+      const FLASHLIGHT = new Item({
+          name: "FLASHLIGHT",
+          textureIndex: 1,
+          readableName: "Flashlight",
+          stackSize: 1
+      })
+
+      const DINAMITE = new Item({
+          name: "DINAMITE",
+          textureIndex: 2,
+          readableName: "Dinamite",
+          stackSize: 20
+      })
   - name: blocks
     code: |
       const GRASSY_DIRT = new Block({
@@ -782,8 +906,563 @@ scripts:
       const COLLISION_CATEGORY_SHIP = 0x0002;
       const COLLISION_CATEGORY_WORLD = 0x0004;
 
+      const UI_SCALE = 3;
+
+      PIXI.settings.ROUND_PIXELS = true;
+
       let isDebugMode: boolean = false;
       let world: World;
+  - name: ui
+    code: |-
+      class Padding {
+          left: number = 0;
+          top: number = 0;
+          right: number = 0;
+          bottom: number = 0;
+
+          width: number;
+          height: number;
+
+          constructor(left: number = 0, top: number = 0, right: number = 0, bottom: number = 0) {
+              this.left = left;
+              this.top = top;
+              this.right = right;
+              this.bottom = bottom;
+
+              this.width = this.left + this.right;
+              this.height = this.bottom + this.top;
+          }
+      }
+
+      class Stack {
+          count: number;
+          itemId: number;
+
+          constructor(count: number = 0, itemId: number = 0) {
+              this.count = count;
+              this.itemId = itemId;
+          }
+
+          isEmpty(): boolean {
+              return this.count == 0
+                  || this.itemId == 0
+                  || !Item.has(this.itemId);
+          }
+
+          setEmpty() {
+              this.count = 0;
+              this.itemId = 0;
+          }
+      }
+
+      class Inventory {
+          static mouseStack: Stack = new Stack();
+
+          columns: number;
+          rows: number;
+          stacks: Stack[];
+          listeners: ((index: number) => void)[] = [];
+          overflowInventory?: Inventory;
+          targetInventory?: Inventory
+
+          constructor(columns: number, rows: number) {
+              this.columns = columns;
+              this.rows = rows;
+              this.stacks = Array.from({ length: columns * rows }, () => new Stack())
+          }
+
+          addListener(fn: (index: number) => void) {
+              this.listeners.push(fn);
+          }
+
+          notify(index: number) {
+              for (const fn of this.listeners) {
+                  fn(index);
+              }
+          }
+
+          setStack(index: number, stack: Stack): Stack {
+              const oldStack = this.stacks[index];
+
+              this.stacks[index] = stack;
+
+              this.notify(index);
+
+              return oldStack;
+          }
+
+          addToStack(index: number, itemId: number): boolean {
+              const item = Item.get(itemId);
+
+              if (!item) {
+                  return false;
+              }
+
+              const stack = this.stacks[index];
+
+              if (stack.isEmpty()) {
+                  this.stacks[index] = new Stack(1, item.id);
+                  this.notify(index);
+                  return true;
+              }
+
+              if (stack.itemId == item.id && stack.count < item.stackSize) {
+                  stack.count++;
+                  this.notify(index);
+                  return true;
+              }
+
+              return false;
+          }
+
+          addStack(itemId: number, count: number = 1): number {
+              const item = Item.get(itemId);
+
+              if (!item) {
+                  return 0;
+              }
+
+              const overflow = !!this.overflowInventory ? this.overflowInventory.stacks : []
+
+              const existingStack = [...this.stacks, ...overflow].find(
+                  stack =>
+                      stack.itemId === item.id &&
+                      stack.count < item.stackSize
+              );
+
+              if (existingStack) {
+                  const newCount = existingStack.count + count;
+
+                  if (newCount <= item.stackSize) {
+                      existingStack.count += count;
+                      this.notify(this.stacks.indexOf(existingStack));
+
+                      return count;
+                  }
+
+                  existingStack.count = item.stackSize;
+                  this.notify(this.stacks.indexOf(existingStack));
+
+                  const rest = newCount - item.stackSize;
+                  return this.addStack(item.id, rest);
+              }
+
+              const emptyStack = this.stacks.find(stack => stack.itemId == 0);
+
+              if (emptyStack) {
+                  if (count <= item.stackSize) {
+                      emptyStack.itemId = item.id;
+                      emptyStack.count = count;
+
+                      this.notify(this.stacks.indexOf(emptyStack));
+                      return count;
+                  }
+
+                  emptyStack.itemId = item.id;
+                  emptyStack.count = item.stackSize;
+                  this.notify(this.stacks.indexOf(emptyStack));
+
+                  return count + this.addStack(item.id, count - item.stackSize)
+
+              } else if (!!this.overflowInventory) {
+                  return this.overflowInventory.addStack(itemId, count);
+              } else {
+                  return 0;
+              }
+          }
+      }
+
+      class Cell extends PIXI.Container {
+          index: number;
+
+          frame: PIXI.NineSlicePlane;
+          icon: PIXI.Sprite;
+          text: PIXI.BitmapText;
+
+          padding: Padding;
+          cellSize: number;
+
+          constructor(
+              index: number,
+              x: number,
+              y: number,
+              texture: PIXI.Texture,
+              cellSize: number,
+              padding: Padding
+          ) {
+              super();
+
+              this.index = index;
+              this.cellSize = cellSize;
+              this.padding = padding;
+
+              this.position.set(x, y);
+
+              this.frame = new PIXI.NineSlicePlane(texture);
+              this.frame.width = cellSize + padding.width;
+              this.frame.height = cellSize + padding.height;
+
+              this.addChild(this.frame);
+
+              this.icon = new PIXI.Sprite();
+              this.icon.visible = false;
+              this.icon.position.set(padding.left, padding.top);
+              this.icon.width = cellSize;
+              this.icon.height = cellSize;
+
+              this.addChild(this.icon);
+
+              this.text = new PIXI.BitmapText("", {
+                  fontName: "monogram",
+                  fontSize: 16,
+                  align: "left"
+              });
+
+              this.text.filters = InventoryUi.textFilters;
+
+              this.text.visible = false;
+
+              this.addChild(this.text);
+          }
+
+          setStack(stack: Stack) {
+              if (!stack || stack.itemId === 0 || stack.count === 0) {
+                  this.icon.visible = false;
+                  this.text.visible = false;
+                  return;
+              }
+
+              const item = Item.get(stack.itemId);
+              if (!item) return;
+
+              this.icon.texture = res.getTexture("items", item.textureIndex);
+              this.icon.visible = true;
+
+              if (stack.count > 1) {
+                  this.text.text = stack.count.toString();
+                  this.text.position.set(
+                      this.padding.left + this.cellSize - this.text.width,
+                      this.padding.right + this.cellSize - this.text.height * 0.8
+                  );
+
+                  this.text.visible = true;
+              } else {
+                  this.text.visible = false;
+              }
+          }
+      }
+
+      type InventoryUiOptions = {
+          cellSize?: number;
+          cellGap?: number;
+          styleIndex?: number;
+          cellType?: UiType;
+          cellPadding?: Padding;
+          hoverPadding?: Padding;
+          panelPadding?: Padding;
+          activeOutlinePadding?: Padding;
+      }
+
+      class InventoryUi {
+          static mouseContainer: PIXI.Container;
+          static mouseIcon: PIXI.Sprite;
+          static mouseText: PIXI.BitmapText;
+          static initialized: boolean;
+          static textFilters: PIXI.Filter[] = [new PIXI.filters.OutlineFilter(UI_SCALE, 0x000000, 1, 1)];
+
+          styleIndex: number;
+
+          root: PIXI.Container;
+
+          panel: PIXI.NineSlicePlane;
+          hover: PIXI.NineSlicePlane;
+          activeOutline: PIXI.NineSlicePlane;
+          cells: Cell[];
+          secondaryUsedCells: Set<number> = new Set();
+
+          cellSize: number;
+          cellGap: number;
+          cellType: UiType;
+
+          cellPadding: Padding;
+          activeOutlinePadding: Padding;
+          hoverPadding: Padding;
+          panelPadding: Padding;
+
+          copy: CopyContainer | null;
+
+          source: Inventory;
+
+          constructor(source: Inventory, options: InventoryUiOptions = {}) {
+              const {
+                  styleIndex = 1,
+                  panelPadding = new Padding(8, 8, 8, 8),
+                  cellPadding = new Padding(2, 2, 2, 2),
+                  hoverPadding = new Padding(-2, -2, -2, -2),
+                  activeOutlinePadding = new Padding(2, 2, 2, 2),
+                  cellGap = 1,
+                  cellType = UiType.Frame,
+                  cellSize = 16
+              } = options;
+
+              this.styleIndex = styleIndex;
+              this.source = source;
+              this.cellPadding = cellPadding;
+              this.hoverPadding = hoverPadding;
+              this.panelPadding = panelPadding;
+              this.cellGap = cellGap;
+              this.cellType = cellType;
+              this.cellSize = cellSize;
+              this.activeOutlinePadding = activeOutlinePadding;
+              this.root = new PIXI.Container();
+              this.root.scale.set(UI_SCALE);
+              this.copy = null;
+              this.cells = [];
+              this.source.addListener((index) => {
+                  const cell = this.cells[index];
+                  if (!cell) return;
+
+                  const stack = this.source.stacks[index];
+                  cell.setStack(stack);
+              });
+          }
+
+          static renderMouseStack() {
+              const stack = Inventory.mouseStack;
+
+              if (!stack || stack.isEmpty()) {
+                  if (this.mouseContainer) {
+                      this.mouseContainer.visible = false;
+                  }
+                  return;
+              }
+
+              const item = Item.get(stack.itemId);
+              if (!item) return;
+
+              if (!this.initialized) {
+                  this.mouseContainer = new PIXI.Container();
+                  this.mouseContainer.scale.set(UI_SCALE);
+
+                  this.mouseIcon = new PIXI.Sprite();
+                  this.mouseIcon.width = 16;
+                  this.mouseIcon.height = 16;
+
+                  this.mouseText = new PIXI.BitmapText("", {
+                      fontName: "monogram",
+                      fontSize: 16
+                  });
+
+                  this.mouseText.filters = InventoryUi.textFilters;
+
+                  this.mouseContainer.addChild(this.mouseIcon);
+                  this.mouseContainer.addChild(this.mouseText);
+
+                  rooms.list["ui"][0].addChild(this.mouseContainer);
+
+                  this.initialized = true;
+              }
+
+              this.mouseContainer.visible = true;
+
+              this.mouseIcon.texture = res.getTexture("items", item.textureIndex);
+
+              this.mouseContainer.position.set(pointer.xui, pointer.yui);
+
+              if (stack.count > 1) {
+                  this.mouseText.text = stack.count.toString();
+
+                  this.mouseText.position.set(
+                      16 - this.mouseText.width,
+                      16 - this.mouseText.height * 0.8
+                  );
+
+                  this.mouseText.visible = true;
+              } else {
+                  this.mouseText.visible = false;
+              }
+          }
+
+          setCopy(copy: CopyContainer) {
+              this.generate();
+
+              if (this.copy) {
+                  this.copy.removeChild(this.root);
+              }
+
+              this.copy = copy;
+              this.root.removeChildren();
+              this.root.addChild(this.panel);
+
+              for (const cell of this.cells) {
+                  this.root.addChild(cell);
+              }
+
+              this.root.addChild(this.hover);
+              this.root.addChild(this.activeOutline);
+
+              copy.addChild(this.root);
+
+              this.root.pivot.set(
+                  this.panel.width / 2,
+                  this.panel.height / 2
+              );
+
+              for (const cell of this.cells) {
+                  const stack = this.source.stacks[cell.index];
+                  cell.setStack(stack);
+              }
+          }
+
+          generate() {
+              if (!this.panel) {
+                  this.panel = new PIXI.NineSlicePlane(getUiTexture(this.styleIndex, UiType.Panel));
+              }
+
+              if (!this.hover) {
+                  this.hover = new PIXI.NineSlicePlane(
+                      res.getTexture("white", 0),
+                      11, 11, 11, 11
+                  );
+                  this.hover.alpha = 0.2;
+                  this.hover.visible = false;
+              }
+
+              if (!this.activeOutline) {
+                  this.activeOutline = new PIXI.NineSlicePlane(
+                      getUiTexture(this.styleIndex, UiType.Outline),
+                      11, 11, 11, 11
+                  );
+
+                  this.activeOutline.visible = false;
+              }
+
+              this.cells.length = 0;
+
+              let drawX = this.panelPadding.left;
+              let drawY = this.panelPadding.top;
+              let index = 0;
+
+              for (let y = 0; y < this.source.rows; y++) {
+                  drawX = this.panelPadding.left;
+
+                  for (let x = 0; x < this.source.columns; x++) {
+                      const cell = this.getCell(drawX, drawY, index);
+                      this.cells.push(cell);
+
+                      drawX += this.cellPadding.width + this.cellSize + this.cellGap;
+                      index++;
+                  }
+                  drawY += this.cellPadding.height + this.cellSize + this.cellGap;
+              }
+
+              this.panel.width = drawX + this.panelPadding.right - this.cellGap;
+              this.panel.height = drawY + this.panelPadding.bottom - this.cellGap;
+          }
+
+          showHover(cell: Cell) {
+              this.hover.visible = true;
+
+              this.hover.x = cell.x - this.hoverPadding.left;
+              this.hover.y = cell.y - this.hoverPadding.top;
+
+              this.hover.width = cell.width + this.hoverPadding.width;
+              this.hover.height = cell.height + this.hoverPadding.height;
+          }
+
+          showActiveOutline(index: number) {
+              const cell = this.cells[index];
+
+              this.activeOutline.visible = true;
+
+              this.activeOutline.x = cell.x - this.activeOutlinePadding.left;
+              this.activeOutline.y = cell.y - this.activeOutlinePadding.top;
+
+              this.activeOutline.width = this.cellSize + this.activeOutlinePadding.width + this.cellPadding.width;
+              this.activeOutline.height = this.cellSize + this.activeOutlinePadding.height + this.cellPadding.height;
+          }
+
+          updateInteraction() {
+              if (!this.copy) return;
+
+              if (!actions.Secondary.down) {
+                  this.secondaryUsedCells.clear();
+              }
+
+              for (const cell of this.cells) {
+
+                  const bounds = cell.getBounds();
+
+                  if (
+                      pointer.xui >= bounds.x &&
+                      pointer.xui <= bounds.x + bounds.width &&
+                      pointer.yui >= bounds.y &&
+                      pointer.yui <= bounds.y + bounds.height
+                  ) {
+                      this.showHover(cell);
+
+                      if (actions.Primary.pressed) {
+                          this.switchStack(cell);
+                      }
+
+                      if (actions.Secondary.down) {
+
+                          if (!this.secondaryUsedCells.has(cell.index)) {
+                              this.addToStack(cell);
+
+                              this.secondaryUsedCells.add(cell.index);
+                          }
+                      }
+
+                      return;
+                  }
+              }
+
+              this.hover.visible = false;
+          }
+
+          addToStack(cell: Cell) {
+              if (Inventory.mouseStack.isEmpty()) {
+                  return;
+              }
+
+              const success = this.source.addToStack(cell.index, Inventory.mouseStack.itemId);
+
+              if (success) {
+                  Inventory.mouseStack.count--;
+              }
+          }
+
+          switchStack(cell: Cell) {
+              const targetStack = this.source.stacks[cell.index];
+              if (!Inventory.mouseStack.isEmpty() && Inventory.mouseStack.itemId == targetStack.itemId) {
+                  const item = Item.get(targetStack.itemId);
+
+                  const sum = Inventory.mouseStack.count + targetStack.count;
+                  if (sum > item.stackSize) {
+                      this.source.setStack(cell.index, new Stack(item.stackSize, item.id));
+                      Inventory.mouseStack.count = sum - item.stackSize;
+                  } else {
+                      this.source.setStack(cell.index, new Stack(sum, item.id));
+                      Inventory.mouseStack.setEmpty();
+                  }
+              } else {
+                  Inventory.mouseStack = this.source.setStack(cell.index, Inventory.mouseStack);
+              }
+
+          }
+
+          getCell(x: number, y: number, index: number): Cell {
+              return new Cell(
+                  index,
+                  x,
+                  y,
+                  getUiTexture(this.styleIndex, this.cellType),
+                  this.cellSize,
+                  this.cellPadding
+              );
+          }
+      }
   - name: debug
     code: |-
       class Debug {
@@ -835,10 +1514,9 @@ scripts:
               }
           }
 
-          static update(copy: any): void {
+          static getText(): string {
               if (!this._initialized || !this._visible || this._order.length === 0) {
-                  if (copy) copy.text = "";
-                  return;
+                  return "";
               }
 
               const lines: string[] = [];
@@ -848,13 +1526,16 @@ scripts:
                   lines.push(`${label}: ${value}`);
               }
 
-              if (copy) {
-                  copy.text = lines.join("\n");
-              }
+              return lines.join("\n");
           }
       }
   - name: world
     code: |
+      type WorldOptions = {
+          cellSize?: number;
+          seed?: string;
+      }
+
       class World {
           x: number;
           y: number;
@@ -870,8 +1551,6 @@ scripts:
           humidityNoiseMap: NoiseMap;
           detailNoiseMap: NoiseMap;
 
-          private hoverOutline?: PIXI.Sprite;
-
           private dirtyLight = true;
 
           private lightSources = new Map<string, number>();
@@ -885,7 +1564,7 @@ scripts:
           private cellOffset: number;
           private visibleChunks = new Set<string>();
 
-          constructor(matterEngine: Matter.Engine, params: GameMapOptions = {}) {
+          constructor(matterEngine: Matter.Engine, params: WorldOptions = {}) {
               const {
                   cellSize = 16,
                   seed
@@ -932,18 +1611,6 @@ scripts:
                   },
               ];
 
-              const sprite = new PIXI.Sprite();
-
-              sprite.texture = res.getTexture("outline", 0);
-
-              sprite.anchor.set(0.5);
-              sprite.zIndex = 10000;
-              sprite.alpha = 0.9;
-
-              rooms.current.addChild(sprite);
-
-              this.hoverOutline = sprite;
-
               this.chunkManager = new ChunkManager();
 
               Matter.Events.on(this.matterEngine, "collisionStart", function (event) {
@@ -981,16 +1648,6 @@ scripts:
 
           private getLightKey(x: number, y: number) {
               return `${x},${y}`;
-          }
-
-          drawHoverOutline(mouseX: number, mouseY: number) {
-              if (!this.hoverOutline) return;
-
-              const { worldX, worldY } = this.getWorldIndex(mouseX, mouseY);
-
-              const center = this.getCoordByIndex(worldX, worldY, "center");
-
-              this.hoverOutline.position.set(center.x, center.y);
           }
 
           addLightSource(worldX: number, worldY: number, intensity: number) {
@@ -3159,7 +3816,7 @@ assets:
             padding: 1
             isBlank: false
             source: 'C:\Users\Chico\Downloads\air.png'
-          - lastmod: 1771615547979
+          - lastmod: 1772658332467
             type: texture
             name: fire
             untill: 0
@@ -3243,34 +3900,33 @@ assets:
             padding: 1
             isBlank: false
             source: 'C:\Users\Chico\Downloads\black.png'
-          - lastmod: 1772312306332
+          - lastmod: 1772679746504
             type: texture
-            name: outline
+            name: white
             untill: 0
             grid:
               - 1
               - 1
             axis:
-              - 10
-              - 10
+              - 0
+              - 0
             marginx: 0
             marginy: 0
-            imgWidth: 20
-            imgHeight: 20
-            width: 20
-            height: 20
+            imgWidth: 16
+            imgHeight: 16
+            width: 16
+            height: 16
             offx: 0
             offy: 0
-            origname: inWT8qRDqJbWM8p.png
+            origname: iBM9TP5nhjNQfd2.png
             shape: rect
-            left: 10
-            right: 10
-            top: 10
-            bottom: 10
-            uid: nWT8qRDqJbWM8p
+            left: 0
+            right: 16
+            top: 0
+            bottom: 16
+            uid: BM9TP5nhjNQfd2
             padding: 1
             isBlank: false
-            source: 'C:\Users\Chico\Downloads\outline.png'
       - type: folder
         uid: 37rBjdJ5Pjcb1g
         colorClass: error
@@ -3334,6 +3990,34 @@ assets:
             padding: 1
             isBlank: false
             source: 'C:\Users\Chico\Downloads\ship.png'
+          - lastmod: 1772677467527
+            type: texture
+            name: items
+            untill: 0
+            grid:
+              - 4
+              - 4
+            axis:
+              - 8
+              - 8
+            marginx: 0
+            marginy: 0
+            imgWidth: 64
+            imgHeight: 64
+            width: 16
+            height: 16
+            offx: 0
+            offy: 0
+            origname: iC4w3TPBLQ3QBB3.png
+            shape: rect
+            left: 8
+            right: 8
+            top: 8
+            bottom: 8
+            uid: C4w3TPBLQ3QBB3
+            padding: 1
+            isBlank: false
+            source: 'C:\Users\Chico\iCloudDrive\strange-places\items.png'
       - type: folder
         uid: qJf6FDDGB8r7dh
         colorClass: warning
@@ -3397,6 +4081,181 @@ assets:
             padding: 1
             isBlank: false
             source: 'C:\Users\Chico\Downloads\cursors\tile_0157.png'
+      - type: folder
+        uid: HdNcc9BGrMf493
+        colorClass: text
+        icon: help-circle
+        name: UI
+        lastmod: 1772343330248
+        entries:
+          - lastmod: 1772343363524
+            type: texture
+            name: ui-button-active
+            untill: 0
+            grid:
+              - 1
+              - 1
+            axis:
+              - 12
+              - 12
+            marginx: 0
+            marginy: 0
+            imgWidth: 24
+            imgHeight: 24
+            width: 24
+            height: 24
+            offx: 0
+            offy: 0
+            origname: ifMKJWbcHBNTkbm.png
+            shape: rect
+            left: 12
+            right: 12
+            top: 12
+            bottom: 12
+            uid: fMKJWbcHBNTkbm
+            padding: 1
+            isBlank: false
+            source: 'C:\Users\Chico\Downloads\ui-button-active.png'
+          - lastmod: 1772343480785
+            type: texture
+            name: ui-button
+            untill: 0
+            grid:
+              - 1
+              - 1
+            axis:
+              - 12
+              - 12
+            marginx: 0
+            marginy: 0
+            imgWidth: 24
+            imgHeight: 24
+            width: 24
+            height: 24
+            offx: 0
+            offy: 0
+            origname: ikfqrMW8fpGT3Ln.png
+            shape: rect
+            left: 12
+            right: 12
+            top: 12
+            bottom: 12
+            uid: kfqrMW8fpGT3Ln
+            padding: 1
+            isBlank: false
+            source: 'C:\Users\Chico\Downloads\ui-button.png'
+          - lastmod: 1772346909144
+            type: texture
+            name: ui-selected
+            untill: 0
+            grid:
+              - 1
+              - 1
+            axis:
+              - 12
+              - 12
+            marginx: 0
+            marginy: 0
+            imgWidth: 24
+            imgHeight: 24
+            width: 24
+            height: 24
+            offx: 0
+            offy: 0
+            origname: iL7BnL7QHQCz2MC.png
+            shape: rect
+            left: 12
+            right: 12
+            top: 12
+            bottom: 12
+            uid: L7BnL7QHQCz2MC
+            padding: 1
+            isBlank: false
+            source: 'C:\Users\Chico\Downloads\ui-selected.png'
+          - lastmod: 1772343498678
+            type: texture
+            name: ui-panel
+            untill: 0
+            grid:
+              - 1
+              - 1
+            axis:
+              - 12
+              - 12
+            marginx: 0
+            marginy: 0
+            imgWidth: 24
+            imgHeight: 24
+            width: 24
+            height: 24
+            offx: 0
+            offy: 0
+            origname: iTpq9zrKmRQPnK1.png
+            shape: rect
+            left: 12
+            right: 12
+            top: 12
+            bottom: 12
+            uid: Tpq9zrKmRQPnK1
+            padding: 1
+            isBlank: false
+            source: 'C:\Users\Chico\Downloads\ui-panel.png'
+          - lastmod: 1772343507979
+            type: texture
+            name: ui-panel-hole
+            untill: 0
+            grid:
+              - 1
+              - 1
+            axis:
+              - 12
+              - 12
+            marginx: 0
+            marginy: 0
+            imgWidth: 24
+            imgHeight: 24
+            width: 24
+            height: 24
+            offx: 0
+            offy: 0
+            origname: i9GJwH3rhRHqhkC.png
+            shape: rect
+            left: 12
+            right: 12
+            top: 12
+            bottom: 12
+            uid: 9GJwH3rhRHqhkC
+            padding: 1
+            isBlank: false
+            source: 'C:\Users\Chico\Downloads\ui-panel-hole.png'
+          - lastmod: 1772551073332
+            type: texture
+            name: ui
+            untill: 0
+            grid:
+              - 6
+              - 5
+            axis:
+              - 12
+              - 12
+            marginx: 0
+            marginy: 0
+            imgWidth: 144
+            imgHeight: 120
+            width: 24
+            height: 24
+            offx: 0
+            offy: 0
+            origname: ijgk2NWmH1CmqQR.png
+            shape: rect
+            left: 12
+            right: 12
+            top: 12
+            bottom: 12
+            uid: jgk2NWmH1CmqQR
+            padding: 1
+            isBlank: false
+            source: 'C:\Users\Chico\iCloudDrive\strange-places\Inventory.png'
   - type: folder
     uid: hQ1tLLpPk9NbCt
     colorClass: error
@@ -3486,7 +4345,7 @@ assets:
           matterGravity:
             - 0
             - 0
-        lastmod: 1772257131532
+        lastmod: 1772678646175
         events:
           - eventKey: OnRoomStart
             code: >-
@@ -3562,8 +4421,8 @@ assets:
         diagonalGrid: false
         disableGrid: false
         simulate: true
-        width: 1280
-        height: 720
+        width: 1920
+        height: 1080
         restrictCamera: false
         restrictMaxX: 1280
         restrictMinX: 0
@@ -3575,8 +4434,8 @@ assets:
         follow: -1
         backgrounds: []
         copies:
-          - x: 16
-            'y': 16
+          - x: 0
+            'y': 0
             opacity: 1
             tint: 16777215
             scale:
@@ -3590,7 +4449,10 @@ assets:
         tiles: []
         extends:
           lightAmbientColor: '#ffffff'
-        lastmod: 1772226296100
+          matterGravity:
+            - 0
+            - 0
+        lastmod: 1772675386980
         events: []
         behaviors: []
         extendTypes: ''
@@ -3600,8 +4462,8 @@ assets:
         onstep: ''
         ondraw: ''
         onleave: ''
-        gridX: 64
-        gridY: 64
+        gridX: 24
+        gridY: 24
         diagonalGrid: false
         disableGrid: false
         simulate: true
@@ -3627,15 +4489,15 @@ assets:
             movementY: 0
             scaleX: 2
             scaleY: 2
-            repeat: repeat
+            repeat: no-repeat
         copies:
-          - x: 448
-            'y': 256
+          - x: 624
+            'y': 336
             opacity: 1
             tint: 16777215
             scale:
               x: 4
-              'y': 4
+              'y': 2
             rotation: 0
             uid: 9QQqNPkkB44HCw
             exts: {}
@@ -3647,71 +4509,11 @@ assets:
           matterGravity:
             - 0
             - 0
-        lastmod: 1771757702070
+        lastmod: 1772674632736
         events: []
         behaviors: []
         extendTypes: ''
         uid: L23W53H5w6nDPn
-      - lastmod: 1771757101538
-        type: texture
-        name: Menu_Button
-        untill: 0
-        grid:
-          - 1
-          - 1
-        axis:
-          - 0
-          - 0
-        marginx: 0
-        marginy: 0
-        imgWidth: 96
-        imgHeight: 32
-        width: 96
-        height: 32
-        offx: 0
-        offy: 0
-        origname: izmNm99h3Jk68HJ.png
-        shape: rect
-        left: 0
-        right: 96
-        top: 0
-        bottom: 32
-        uid: zmNm99h3Jk68HJ
-        padding: 1
-        isBlank: false
-        source: >-
-          C:\Users\Chico\AppData\Local\ct.js\package.nw\bundledAssets\textures\Dungeon
-          Crawler 16x16\Menu_Button.png
-      - lastmod: 1771757103098
-        type: texture
-        name: Menu_Button_Press
-        untill: 0
-        grid:
-          - 1
-          - 1
-        axis:
-          - 0
-          - 0
-        marginx: 0
-        marginy: 0
-        imgWidth: 96
-        imgHeight: 32
-        width: 96
-        height: 32
-        offx: 0
-        offy: 0
-        origname: iGCzRFdT5hJr5LG.png
-        shape: rect
-        left: 0
-        right: 96
-        top: 0
-        bottom: 32
-        uid: GCzRFdT5hJr5LG
-        padding: 1
-        isBlank: false
-        source: >-
-          C:\Users\Chico\AppData\Local\ct.js\package.nw\bundledAssets\textures\Dungeon
-          Crawler 16x16\Menu_Button_Press.png
   - type: folder
     uid: 9d53kG17pnjf4N
     colorClass: success
@@ -3720,10 +4522,10 @@ assets:
     lastmod: 1771358773870
     entries:
       - type: template
-        baseClass: Text
+        baseClass: Container
         name: debug-window
         depth: 0
-        texture: -1
+        texture: Tpq9zrKmRQPnK1
         playAnimationOnStart: false
         loopAnimation: true
         animationFPS: 30
@@ -3731,15 +4533,55 @@ assets:
         events:
           - eventKey: OnStep
             lib: core
-            code: |-
-              Debug.update(this);
+            code: >-
+              this.label.text = Debug.getText();
+
               this.visible = isDebugMode;
+
+
+              this.background.width = camera.width / UI_SCALE;
+
+              this.background.height = this.label.height +
+              this.backgroundPaddingY * 2;
             arguments: {}
           - eventKey: OnCreate
-            code: |-
+            code: >-
               Debug.init();
 
+
+              this.visible = false;
+
+              this.background = new PIXI.NineSlicePlane(getUiTexture(4,
+              UiType.Panel));
+
+              this.background.alpha = 0.5;
+
+              this.backgroundPaddingX = 12;
+
+              this.backgroundPaddingY = 8;
+
+
+              this.label = new PIXI.BitmapText("", {
+                  fontName: "monogram",
+                  align: 'left',
+                  fontSize: 16
+              });
+
+
+              this.addChild(this.background);
+
+              this.addChild(this.label);
+
+              this.scale.set(UI_SCALE / 2)
+
+
+              this.label.position.x = this.backgroundPaddingX;
+
+              this.label.position.y = this.backgroundPaddingY;
+
+
               Debug.set("FPS", () => Math.round(pixiApp.ticker.FPS));
+
               Debug.set("Camera Scale", () => camera.scale.x);
             arguments: {}
             lib: core
@@ -3765,12 +4607,22 @@ assets:
           matterRopeStiffness: 0
           matterRopeDamping: 0
           cursorpointer: false
-        lastmod: 1772294378787
+        lastmod: 1772673650279
         uid: dmjhq981DBCJ5H
         behaviors: []
-        extendTypes: ''
+        extendTypes: |-
+          label: PIXI.BitmapText;
+          background: PIXI.NineSlicePlane;
+          backgroundPaddingX: number;
+          backgroundPaddingY: number;
         defaultText: ''
         textStyle: MgR3BRKpWWrGdw
+        nineSliceSettings:
+          top: 16
+          left: 16
+          bottom: 16
+          right: 16
+          autoUpdate: false
       - type: template
         baseClass: AnimatedSprite
         name: ship
@@ -4053,47 +4905,6 @@ assets:
           currentBiome: Biome;
       - type: template
         baseClass: AnimatedSprite
-        name: mouse-lamp
-        depth: 0
-        texture: -1
-        playAnimationOnStart: false
-        loopAnimation: true
-        animationFPS: 30
-        visible: true
-        events:
-          - eventKey: OnStep
-            lib: core
-            code: |-
-              // if (actions.Primary.down) {
-              //     this.
-              // }
-              this.x = pointer.x;
-              this.y = pointer.y;
-            arguments: {}
-          - eventKey: OnCreate
-            code: |-
-              this.light = light.add(
-                  res.getTexture('light_texture', 0),
-                  0, 0, {
-                      owner: this,
-                      tint: 0xFFFFFF,
-                  }
-              );
-            arguments: {}
-            lib: core
-        extends:
-          cgroup: ''
-          lightTexture@@texture: -1
-          lightColor: '#FFFFFF'
-          lightOpacity: false
-          lightScale: 1
-        lastmod: 1771258052483
-        uid: T237CtnwRJPhJg
-        behaviors: []
-        extendTypes: ''
-        blendMode: normal
-      - type: template
-        baseClass: AnimatedSprite
         name: player
         depth: -1.4
         texture: Mr6hmJpk2RJH4J
@@ -4106,27 +4917,31 @@ assets:
             lib: core
             code: |-
               this.update();
+              if(!!this.hand) {
+                  this.hand.update();
+              }
+              InventoryUi.renderMouseStack();
 
-              // const canEnterShip = u.distance(this, this.ship) < 10;
-
-              if (actions.Primary.down) {
-                  if (this.isBuildMode) {
-                      world.changeBlock(pointer.x, pointer.y, DIRT.id);
-                  } else {
-                      world.damageBlock(pointer.x, pointer.y, this.damagePerSecond * u.time);
-                  }
+              if (actions.Extra.down && actions.Primary.pressed) {
+                  this.inventoryHotbar.addStack(PISTOL.id, 1);
+              }
+              if (actions.Extra.down && actions.Secondary.pressed) {
+                  this.inventoryHotbar.addStack(DINAMITE.id, 50);
               }
 
-              if (actions.Secondary.down) {
-                  if (this.isBuildMode) {
-                      world.changeBackgroundBlock(pointer.x, pointer.y, DIRT.id);
-                  } else {
-                      world.damageBackgroundBlock(pointer.x, pointer.y, this.damagePerSecond * u.time);
-                  }
+              if (actions.ToggleInventory.pressed) {
+                  this.inventoryRenderer.visible = !this.inventoryRenderer.visible;
               }
 
-              if (actions.Ternary.pressed) {
-                  this.isBuildMode = !this.isBuildMode;
+              if (actions.Scroll.pressed && !actions.Extra.down) {
+                  this.hotbarSelectedIndex += actions.Scroll.value;
+                  if (this.hotbarSelectedIndex == -1) {
+                      this.hotbarSelectedIndex = 8
+                  } else if(this.hotbarSelectedIndex == 9) {
+                      this.hotbarSelectedIndex = 0
+                  }
+                  this.hand = Item.get(this.inventoryHotbar.stacks[this.hotbarSelectedIndex].itemId);
+                  this.hotbarRenderer.showActiveOutline(this.hotbarSelectedIndex);
               }
 
               let newWalkVelocity = this.matterBody.velocity.x;
@@ -4180,6 +4995,57 @@ assets:
               this.isBuildMode = false;
 
 
+              this.inventory = new Inventory(9, 6);
+
+              this.inventoryHotbar = new Inventory(9, 1);
+
+              this.hotbarSelectedIndex = 0;
+
+              this.hand =
+              Item.get(this.inventoryHotbar.stacks[this.hotbarSelectedIndex].itemId);
+
+              this.inventoryHotbar.overflowInventory = this.inventory;
+
+
+              const uiRoom = rooms.list['ui'][0];
+
+
+              this.inventoryRenderer = templates.copyIntoRoom(
+                  "inventory-renderer",
+                  camera.width / 2,
+                  camera.height / 2, uiRoom, {
+                      inventoryUi: new InventoryUi(this.inventory, {
+                          styleIndex: 0,
+                          cellGap: 0,
+                          panelPadding: new Padding(7, 7, 7, 7),
+                          cellType: UiType.Frame
+                      }),
+                      visible: false
+                  }
+              );
+
+
+              this.hotbarRenderer = templates.copyIntoRoom(
+                  "inventory-renderer",
+                  camera.width / 2,
+                  camera.height - 60, uiRoom, {
+                      inventoryUi: new InventoryUi(this.inventoryHotbar, {
+                          styleIndex: 0,
+                          cellGap: 0,
+                          panelPadding: new Padding(7, 7, 7, 7),
+                          activeOutlinePadding: new Padding(3, 3, 3, 3),
+                          cellType: UiType.Frame
+                      })
+                  }
+              );
+
+
+              this.hotbarRenderer.y -= this.hotbarRenderer.getBounds().bottom -
+              camera.height;
+
+              this.hotbarRenderer.showActiveOutline(this.hotbarSelectedIndex);
+
+
               this.loop = true;
 
               this.animationSpeed = 0.15;
@@ -4192,9 +5058,6 @@ assets:
               this.walkAcceleration = 3.6;
 
               this.maxWalkVelocity = 1.6;
-
-
-              this.damagePerSecond = 1000;
 
 
               this.isGrounded = false;
@@ -4304,11 +5167,11 @@ assets:
           lightOpacity: false
           lightScale: 0
           cursorpointer: false
-        lastmod: 1772294418797
+        lastmod: 1772682570043
         uid: HbdjfWPTmMR79j
         behaviors:
           - pd8grnPh27DHL7
-        extendTypes: |
+        extendTypes: |-
           matterBody: Matter.Body;
           update: () => void;
           isGrounded: boolean;
@@ -4319,12 +5182,18 @@ assets:
           maxWalkVelocity: number;
           walkAcceleration: number;
           bodiesNear: Matter.Body[];
+          inventory: Inventory;
+          inventoryRenderer: BasicCopy;
+          hotbarSelectedIndex: number;
+          hand: Item;
+          inventoryHotbar: Inventory;
+          hotbarRenderer: BasicCopy;
         blendMode: normal
       - type: template
         baseClass: Button
         name: button
         depth: 0
-        texture: zmNm99h3Jk68HJ
+        texture: kfqrMW8fpGT3Ln
         playAnimationOnStart: false
         loopAnimation: true
         animationFPS: 30
@@ -4332,6 +5201,48 @@ assets:
         events:
           - eventKey: OnPointerClick
             code: rooms.switch('main');
+            arguments: {}
+            lib: core
+          - eventKey: OnStep
+            code: >
+              this.hoverOutline.transform.position.x = this.x -
+              this.hoverOutlinePadding;
+
+              this.hoverOutline.transform.position.y = this.y -
+              this.hoverOutlinePadding;
+
+
+              this.hoverOutline.width = this.width + 2 *
+              this.hoverOutlinePadding;
+
+              this.hoverOutline.height = this.height + 2 *
+              this.hoverOutlinePadding;
+
+
+              this.hoverOutline.visible = !!pointer.hovers(this);
+            arguments: {}
+            lib: core
+          - eventKey: OnCreate
+            code: |-
+              this.hoverOutline = new PIXI.NineSlicePlane(
+                  res.getTexture("ui-selected", 0),
+                  11,
+                  11,
+                  11,
+                  11
+              );
+
+              this.hoverOutline.zIndex = this.zIndex + 1;
+              rooms.current.addChild(this.hoverOutline);
+
+              this.hoverOutline.visible = false;
+              this.hoverOutlinePadding = 4;
+              this.scale.set(UI_SCALE);
+              this.textLabel = new PIXI.BitmapText("Play", {
+                  fontName: "monogram",
+                  align: "center",
+                  fontSize: UI_SCALE * 16,
+              })
             arguments: {}
             lib: core
         extends:
@@ -4355,21 +5266,24 @@ assets:
           matterRopeLength: 0
           matterRopeStiffness: 0
           matterRopeDamping: 0
-        lastmod: 1772205696473
+        lastmod: 1772674610636
         uid: 9QQqNPkkB44HCw
         behaviors: []
-        extendTypes: ''
+        extendTypes: |-
+          hoverOutline: PIXI.NineSlicePlane;
+          hoverOutlinePadding: number;
         defaultText: Play
-        textStyle: 56hCntp79pncQz
+        textStyle: fL5ChNbb5d3cwB
         nineSliceSettings:
-          top: 16
-          left: 16
-          bottom: 16
-          right: 16
+          top: 8
+          left: 8
+          bottom: 8
+          right: 8
           autoUpdate: false
         hoverTexture: -1
-        pressedTexture: GCzRFdT5hJr5LG
+        pressedTexture: fMKJWbcHBNTkbm
         disabledTexture: -1
+        useBitmapText: false
       - type: folder
         uid: ndMdGtCcb6gg6D
         colorClass: success
@@ -4445,6 +5359,35 @@ assets:
         uid: 6g8CzQhnJ65tkp
         behaviors: []
         extendTypes: ''
+      - type: template
+        baseClass: Container
+        name: inventory-renderer
+        depth: 0
+        texture: -1
+        playAnimationOnStart: false
+        loopAnimation: true
+        animationFPS: 30
+        visible: true
+        events:
+          - eventKey: OnStep
+            lib: core
+            code: this.inventoryUi.updateInteraction();
+            arguments: {}
+          - eventKey: OnCreate
+            code: |-
+              this.inventoryUi.setCopy(this);
+
+              this.showActiveOutline = (index: number) => {
+                  this.inventoryUi.showActiveOutline(index);
+              }
+            arguments: {}
+            lib: core
+        extends:
+          cgroup: ''
+        lastmod: 1772673610924
+        uid: M5bzN3f29GjrdM
+        behaviors: []
+        extendTypes: 'inventoryUi: InventoryUi;'
   - type: folder
     uid: p9DchCCMDrmQkb
     colorClass: text
@@ -4543,7 +5486,7 @@ assets:
           - type: style
             name: monogram
             uid: MgR3BRKpWWrGdw
-            typeface: n5B3MTpKkwkLLR
+            typeface: DJLgpC4mj1Pdmz
             font:
               family: sans-serif
               halign: left
@@ -4559,23 +5502,48 @@ assets:
               color1: '#cccccc'
               color2: '#ffffff'
               gradtype: 1
-            lastmod: 1772227998800
+            lastmod: 1772376975414
+          - type: style
+            name: monogram_L
+            uid: fL5ChNbb5d3cwB
+            typeface: DJLgpC4mj1Pdmz
+            font:
+              family: sans-serif
+              halign: center
+              italic: false
+              size: 32
+              weight: '400'
+              wrap: false
+              wrapPosition: 640
+              lineHeight: 26
+            fill:
+              type: 0
+              color: '#ffffff'
+              color1: '#cccccc'
+              color2: '#ffffff'
+              gradtype: 1
+            lastmod: 1772377197284
+            shadow:
+              color: '#0E1424'
+              x: 0
+              'y': 2
+              blur: 0
       - name: monogram
         type: typeface
         fonts:
           - weight: '400'
             italic: false
-            uid: q8n3Gmb4b3wR9r
+            uid: CLdRWG7DbfgBqp
             origname: monogram
-        lastmod: 1772206323607
-        bitmapFont: false
+        lastmod: 1772673890948
+        bitmapFont: true
         bitmapFontSize: 16
         bitmapFontLineHeight: 18
-        bitmapPrecision: false
+        bitmapPrecision: true
         charsets:
           - allInFont
         customCharset: ''
-        uid: n5B3MTpKkwkLLR
+        uid: DJLgpC4mj1Pdmz
   - type: folder
     uid: kjkMkpkhpdj5WH
     colorClass: act
@@ -4926,8 +5894,8 @@ assets:
         code: |-
           let maxCameraScale = isDebugMode ? 4 : 1.2;
 
-          if (actions.Zoom.pressed) {
-              camera.scale.x += -actions.Zoom.value * 0.2;
+          if (actions.Scroll.pressed && actions.Extra.down) {
+              camera.scale.x += actions.Scroll.value * 0.2;
               camera.scale.x = u.clamp(0.2, camera.scale.x, maxCameraScale);
 
               camera.scale.y = camera.scale.x;
@@ -4945,11 +5913,18 @@ assets:
 
           world.updateChunkVisibility(camera.getBounds());
           world.update();
-          world.drawHoverOutline(pointer.x, pointer.y);
         language: typescript
         variables: []
         runAutomatically: false
-        lastmod: 1772312512236
+        lastmod: 1772347008044
+        type: script
+      - uid: cmGtf6w9P2pNDN
+        name: CameraSetup
+        code: ''
+        language: typescript
+        variables: []
+        runAutomatically: false
+        lastmod: 1772678595998
         type: script
 globalVars: []
 settings:
