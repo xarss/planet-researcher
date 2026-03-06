@@ -91,6 +91,19 @@ actions:
 scripts:
   - name: util
     code: |-
+      type DebugValue = any | (() => any);
+      type Tilemap = ReturnType<typeof tilemaps.create>;
+
+      class Texture extends PIXI.Texture {}
+      class Sprite extends PIXI.Sprite {}
+      class Container extends PIXI.Container {}
+      class Rectangle extends PIXI.Rectangle {}
+      class Graphics extends PIXI.Graphics {}
+      class NineSlicePlane extends PIXI.NineSlicePlane {}
+      class BitmapText extends PIXI.BitmapText {}
+      class Filter extends PIXI.Filter {}
+      class Scale extends PIXI.ObservablePoint<any> {}
+
       function stringToSeed(str: string) {
           let hash = 0;
 
@@ -161,9 +174,26 @@ scripts:
           const heightSharpness = 1 / 50000;
           return Math.exp(-Math.pow(difference, 2) * heightSharpness) * weight;
       }
+  - name: globals
+    code: |-
+      const SKY_TOP = -100;
+      const SURFACE_TOP = 0;
+      const UNDERGROUND_TOP = 30;
+      const DEEPTS_TOP = 600;
+      const MAP_BOTTOM = 700;
 
-      type DebugValue = any | (() => any);
-      type Tilemap = ReturnType<typeof tilemaps.create>;
+      enum CollisionCategory {
+          Player = 0x0001,
+          Entity = 0x0002,
+          Block = 0x0004,
+      }
+
+      const UI_SCALE = 3;
+
+      PIXI.settings.ROUND_PIXELS = true;
+
+      let isDebugMode: boolean = false;
+      let world: World;
   - name: enums
     code: |-
       enum BiomeLayer {
@@ -186,7 +216,7 @@ scripts:
       const styleSheetRows = 5;
       const styleSheetName = "ui";
 
-      function getUiTexture(index: number, uiType: UiType): CtjsTexture  {
+      function getUiTexture(index: number, uiType: UiType): Texture  {
           const frame = index * styleSheetColumns + uiType;
           
           return res.getTexture(styleSheetName, frame);
@@ -225,6 +255,8 @@ scripts:
 
           light: Uint8Array;
 
+          entities: EntityData[];
+
           dirtyGeometry?: boolean;
           dirtyLighting?: boolean;
           dirtyPhysics?: boolean;
@@ -232,10 +264,62 @@ scripts:
       };
   - name: classes
     code: |-
+      class LootTable {
+          result: Stack;
+
+          constructor(result: Stack) {
+              this.result = result;
+          }
+
+          next(): Stack[] {
+              return [this.result];
+          }
+      }
+
+      type EntityData = {
+          template: string;
+          x: number;
+          y: number;
+          angle: number;
+          scaleX: number;
+          scaleY: number;
+      }
+
+      abstract class Entity<T extends EntityData> {
+          static registry = new Map<string, Entity<any>>();
+
+          static register(template: string, entity: Entity<any>) {
+              this.registry.set(template, entity);
+          }
+
+          static get(template: string) {
+              return this.registry.get(template);
+          }
+
+          serialize(copy: BasicCopy): T {
+              return {
+                  x: copy.x,
+                  y: copy.y,
+                  angle: copy.angle,
+                  scaleX: copy.scale.x,
+                  scaleY: copy.scale.y,
+                  template: copy.template
+              } as T;
+          }
+
+          deserialize(data: T, params: any = {}): void {
+              const copy = templates.copy(data.template, data.x, data.y, { reloading: true, ...params })
+
+              copy.angle = data.angle;
+              copy.scale.set(data.scaleX, data.scaleY);
+          }
+      }
+
       type ItemOptions = {
           name: string;
           readableName: string;
-          textureIndex: number;
+          texture: string;
+          frame?: number;
           stackSize?: number;
       }
 
@@ -246,13 +330,15 @@ scripts:
           id: number;
           name: string;
           readableName: string;
-          textureIndex: number;
+          texture: string;
+          frame: number;
           stackSize: number;
 
           constructor(options: ItemOptions) {
               const {
                   name,
-                  textureIndex,
+                  texture,
+                  frame = 0,
                   readableName,
                   stackSize = 99
               } = options;
@@ -261,7 +347,8 @@ scripts:
               this.name = name;
               this.readableName = readableName;
               this.stackSize = stackSize;
-              this.textureIndex = textureIndex;
+              this.texture = texture;
+              this.frame = frame;
 
               Item.registry.set(this.id, this);
           }
@@ -274,9 +361,9 @@ scripts:
               return Item.registry.has(id);
           }
 
-          update() {}
-          onEnterHand() {}
-          onLeaveHand() {}
+          update() { }
+          onEnterHand() { }
+          onLeaveHand() { }
       }
 
       type BlockOptions = {
@@ -288,6 +375,7 @@ scripts:
           renderLayer?: number;
           lightEmission?: number;
           maxHp?: number;
+          lootTable?: LootTable;
       }
 
       class Block {
@@ -303,6 +391,7 @@ scripts:
           renderLayer: number;
           maxHp: number;
           lightEmission?: number;
+          lootTable?: LootTable;
 
           constructor(options: BlockOptions) {
               const {
@@ -313,7 +402,8 @@ scripts:
                   renderLayer = 1,
                   lightOpacity = 1,
                   lightEmission = 0,
-                  maxHp = 200
+                  maxHp = 200,
+                  lootTable = null
               } = options;
 
               this.id = Block.nextId++;
@@ -325,12 +415,28 @@ scripts:
               this.lightOpacity = lightOpacity;
               this.renderLayer = renderLayer;
               this.maxHp = maxHp;
+              this.lootTable = lootTable;
 
               Block.registry.set(this.id, this);
           }
 
           static get(id: number): Block {
               return Block.registry.get(id);
+          }
+
+          onDamaged() { }
+          onPlaced() { }
+          onSecondary() { }
+          onDestroyed(worldX: number, worldY: number) {
+              if (!this.lootTable) {
+                  return;
+              }
+
+              const { x, y } = world.getCoordByIndex(worldX, worldY, "center");
+
+              for (const stack of this.lootTable.next()) {
+                  templates.copy('item-stack', x, y, { stack: stack });
+              }
           }
       }
 
@@ -528,6 +634,557 @@ scripts:
               return (total + 1) / 2;
           }
       }
+  - name: ui
+    code: |-
+      class Padding {
+          left: number = 0;
+          top: number = 0;
+          right: number = 0;
+          bottom: number = 0;
+
+          width: number;
+          height: number;
+
+          constructor(left: number = 0, top: number = 0, right: number = 0, bottom: number = 0) {
+              this.left = left;
+              this.top = top;
+              this.right = right;
+              this.bottom = bottom;
+
+              this.width = this.left + this.right;
+              this.height = this.bottom + this.top;
+          }
+      }
+
+      class Stack {
+          count: number;
+          itemId: number;
+
+          constructor(count: number = 0, itemId: number = 0) {
+              this.count = count;
+              this.itemId = itemId;
+          }
+
+          isEmpty(): boolean {
+              return this.count == 0
+                  || this.itemId == 0
+                  || !Item.has(this.itemId);
+          }
+
+          setEmpty() {
+              this.count = 0;
+              this.itemId = 0;
+          }
+      }
+
+      class Inventory {
+          static mouseStack: Stack = new Stack();
+
+          columns: number;
+          rows: number;
+          stacks: Stack[];
+          listeners: ((index: number) => void)[] = [];
+          overflowInventory?: Inventory;
+          targetInventory?: Inventory
+
+          constructor(columns: number, rows: number) {
+              this.columns = columns;
+              this.rows = rows;
+              this.stacks = Array.from({ length: columns * rows }, () => new Stack())
+          }
+
+          addListener(fn: (index: number) => void) {
+              this.listeners.push(fn);
+          }
+
+          notify(index: number) {
+              for (const fn of this.listeners) {
+                  fn(index);
+              }
+          }
+
+          setStack(index: number, stack: Stack): Stack {
+              const oldStack = this.stacks[index];
+
+              this.stacks[index] = stack;
+
+              this.notify(index);
+
+              return oldStack;
+          }
+
+          addToStack(index: number, itemId: number): boolean {
+              const item = Item.get(itemId);
+
+              if (!item) {
+                  return false;
+              }
+
+              const stack = this.stacks[index];
+
+              if (stack.isEmpty()) {
+                  this.stacks[index] = new Stack(1, item.id);
+                  this.notify(index);
+                  return true;
+              }
+
+              if (stack.itemId == item.id && stack.count < item.stackSize) {
+                  stack.count++;
+                  this.notify(index);
+                  return true;
+              }
+
+              return false;
+          }
+
+          addStack(itemId: number, count: number = 1): number {
+              const item = Item.get(itemId);
+
+              if (!item) {
+                  return 0;
+              }
+
+              const overflow = !!this.overflowInventory ? this.overflowInventory.stacks : []
+
+              const existingStack = [...this.stacks, ...overflow].find(
+                  stack =>
+                      stack.itemId === item.id &&
+                      stack.count < item.stackSize
+              );
+
+              if (existingStack) {
+                  const newCount = existingStack.count + count;
+
+                  if (newCount <= item.stackSize) {
+                      existingStack.count += count;
+                      this.notify(this.stacks.indexOf(existingStack));
+
+                      return count;
+                  }
+
+                  existingStack.count = item.stackSize;
+                  this.notify(this.stacks.indexOf(existingStack));
+
+                  const rest = newCount - item.stackSize;
+                  return this.addStack(item.id, rest);
+              }
+
+              const emptyStack = this.stacks.find(stack => stack.itemId == 0);
+
+              if (emptyStack) {
+                  if (count <= item.stackSize) {
+                      emptyStack.itemId = item.id;
+                      emptyStack.count = count;
+
+                      this.notify(this.stacks.indexOf(emptyStack));
+                      return count;
+                  }
+
+                  emptyStack.itemId = item.id;
+                  emptyStack.count = item.stackSize;
+                  this.notify(this.stacks.indexOf(emptyStack));
+
+                  return count + this.addStack(item.id, count - item.stackSize)
+
+              } else if (!!this.overflowInventory) {
+                  return this.overflowInventory.addStack(itemId, count);
+              } else {
+                  return 0;
+              }
+          }
+      }
+
+      class Cell extends PIXI.Container {
+          index: number;
+
+          frame: NineSlicePlane;
+          icon: Sprite;
+          text: BitmapText;
+
+          padding: Padding;
+          cellSize: number;
+
+          constructor(
+              index: number,
+              x: number,
+              y: number,
+              texture: Texture,
+              cellSize: number,
+              padding: Padding
+          ) {
+              super();
+
+              this.index = index;
+              this.cellSize = cellSize;
+              this.padding = padding;
+
+              this.position.set(x, y);
+
+              this.frame = new PIXI.NineSlicePlane(texture);
+              this.frame.width = cellSize + padding.width;
+              this.frame.height = cellSize + padding.height;
+
+              this.addChild(this.frame);
+
+              this.icon = new PIXI.Sprite();
+              this.icon.visible = false;
+              this.icon.position.set(padding.left, padding.top);
+              this.icon.width = cellSize;
+              this.icon.height = cellSize;
+
+              this.addChild(this.icon);
+
+              this.text = new PIXI.BitmapText("", {
+                  fontName: "monogram",
+                  fontSize: 16,
+                  align: "left"
+              });
+
+              this.text.filters = InventoryUi.textFilters;
+
+              this.text.visible = false;
+
+              this.addChild(this.text);
+          }
+
+          setStack(stack: Stack) {
+              if (!stack || stack.itemId === 0 || stack.count === 0) {
+                  this.icon.visible = false;
+                  this.text.visible = false;
+                  return;
+              }
+
+              const item = Item.get(stack.itemId);
+              if (!item) return;
+
+              this.icon.texture = res.getTexture(item.texture, item.frame);
+              this.icon.visible = true;
+
+              if (stack.count > 1) {
+                  this.text.text = stack.count.toString();
+                  this.text.position.set(
+                      this.padding.left + this.cellSize - this.text.width,
+                      this.padding.right + this.cellSize - this.text.height * 0.8
+                  );
+
+                  this.text.visible = true;
+              } else {
+                  this.text.visible = false;
+              }
+          }
+      }
+
+      type InventoryUiOptions = {
+          cellSize?: number;
+          cellGap?: number;
+          styleIndex?: number;
+          cellType?: UiType;
+          cellPadding?: Padding;
+          hoverPadding?: Padding;
+          panelPadding?: Padding;
+          activeOutlinePadding?: Padding;
+      }
+
+      class InventoryUi {
+          static mouseContainer: Container;
+          static mouseIcon: Sprite;
+          static mouseText: BitmapText;
+          static initialized: boolean;
+          static textFilters: Filter[] = [new PIXI.filters.OutlineFilter(UI_SCALE, 0x000000, 1, 1)];
+
+          styleIndex: number;
+
+          root: Container;
+
+          panel: NineSlicePlane;
+          hover: NineSlicePlane;
+          activeOutline: NineSlicePlane;
+          cells: Cell[];
+          secondaryUsedCells: Set<number> = new Set();
+
+          cellSize: number;
+          cellGap: number;
+          cellType: UiType;
+
+          cellPadding: Padding;
+          activeOutlinePadding: Padding;
+          hoverPadding: Padding;
+          panelPadding: Padding;
+
+          copy: CopyContainer | null;
+
+          source: Inventory;
+
+          constructor(source: Inventory, options: InventoryUiOptions = {}) {
+              const {
+                  styleIndex = 1,
+                  panelPadding = new Padding(8, 8, 8, 8),
+                  cellPadding = new Padding(2, 2, 2, 2),
+                  hoverPadding = new Padding(-2, -2, -2, -2),
+                  activeOutlinePadding = new Padding(2, 2, 2, 2),
+                  cellGap = 1,
+                  cellType = UiType.Frame,
+                  cellSize = 16
+              } = options;
+
+              this.styleIndex = styleIndex;
+              this.source = source;
+              this.cellPadding = cellPadding;
+              this.hoverPadding = hoverPadding;
+              this.panelPadding = panelPadding;
+              this.cellGap = cellGap;
+              this.cellType = cellType;
+              this.cellSize = cellSize;
+              this.activeOutlinePadding = activeOutlinePadding;
+              this.root = new PIXI.Container();
+              this.root.scale.set(UI_SCALE);
+              this.copy = null;
+              this.cells = [];
+              this.source.addListener((index) => {
+                  const cell = this.cells[index];
+                  if (!cell) return;
+
+                  const stack = this.source.stacks[index];
+                  cell.setStack(stack);
+              });
+          }
+
+          static renderMouseStack() {
+              const stack = Inventory.mouseStack;
+
+              if (!stack || stack.isEmpty()) {
+                  if (this.mouseContainer) {
+                      this.mouseContainer.visible = false;
+                  }
+                  return;
+              }
+
+              const item = Item.get(stack.itemId);
+              if (!item) return;
+
+              if (!this.initialized) {
+                  this.mouseContainer = new PIXI.Container();
+                  this.mouseContainer.scale.set(UI_SCALE);
+
+                  this.mouseIcon = new PIXI.Sprite();
+                  this.mouseIcon.width = 16;
+                  this.mouseIcon.height = 16;
+
+                  this.mouseText = new PIXI.BitmapText("", {
+                      fontName: "monogram",
+                      fontSize: 16
+                  });
+
+                  this.mouseText.filters = InventoryUi.textFilters;
+
+                  this.mouseContainer.addChild(this.mouseIcon);
+                  this.mouseContainer.addChild(this.mouseText);
+
+                  rooms.list["ui"][0].addChild(this.mouseContainer);
+
+                  this.initialized = true;
+              }
+
+              this.mouseContainer.visible = true;
+
+              this.mouseIcon.texture = res.getTexture(item.texture, item.frame);
+
+              this.mouseContainer.position.set(pointer.xui, pointer.yui);
+
+              if (stack.count > 1) {
+                  this.mouseText.text = stack.count.toString();
+
+                  this.mouseText.position.set(
+                      16 - this.mouseText.width,
+                      16 - this.mouseText.height * 0.8
+                  );
+
+                  this.mouseText.visible = true;
+              } else {
+                  this.mouseText.visible = false;
+              }
+          }
+
+          setCopy(copy: CopyContainer) {
+              this.generate();
+
+              if (this.copy) {
+                  this.copy.removeChild(this.root);
+              }
+
+              this.copy = copy;
+              this.root.removeChildren();
+              this.root.addChild(this.panel);
+
+              for (const cell of this.cells) {
+                  this.root.addChild(cell);
+              }
+
+              this.root.addChild(this.hover);
+              this.root.addChild(this.activeOutline);
+
+              copy.addChild(this.root);
+
+              this.root.pivot.set(
+                  this.panel.width / 2,
+                  this.panel.height / 2
+              );
+
+              for (const cell of this.cells) {
+                  const stack = this.source.stacks[cell.index];
+                  cell.setStack(stack);
+              }
+          }
+
+          generate() {
+              if (!this.panel) {
+                  this.panel = new PIXI.NineSlicePlane(getUiTexture(this.styleIndex, UiType.Panel));
+              }
+
+              if (!this.hover) {
+                  this.hover = new PIXI.NineSlicePlane(
+                      res.getTexture("white", 0),
+                      11, 11, 11, 11
+                  );
+                  this.hover.alpha = 0.2;
+                  this.hover.visible = false;
+              }
+
+              if (!this.activeOutline) {
+                  this.activeOutline = new PIXI.NineSlicePlane(
+                      getUiTexture(this.styleIndex, UiType.Outline),
+                      11, 11, 11, 11
+                  );
+
+                  this.activeOutline.visible = false;
+              }
+
+              this.cells.length = 0;
+
+              let drawX = this.panelPadding.left;
+              let drawY = this.panelPadding.top;
+              let index = 0;
+
+              for (let y = 0; y < this.source.rows; y++) {
+                  drawX = this.panelPadding.left;
+
+                  for (let x = 0; x < this.source.columns; x++) {
+                      const cell = this.getCell(drawX, drawY, index);
+                      this.cells.push(cell);
+
+                      drawX += this.cellPadding.width + this.cellSize + this.cellGap;
+                      index++;
+                  }
+                  drawY += this.cellPadding.height + this.cellSize + this.cellGap;
+              }
+
+              this.panel.width = drawX + this.panelPadding.right - this.cellGap;
+              this.panel.height = drawY + this.panelPadding.bottom - this.cellGap;
+          }
+
+          showHover(cell: Cell) {
+              this.hover.visible = true;
+
+              this.hover.x = cell.x - this.hoverPadding.left;
+              this.hover.y = cell.y - this.hoverPadding.top;
+
+              this.hover.width = cell.width + this.hoverPadding.width;
+              this.hover.height = cell.height + this.hoverPadding.height;
+          }
+
+          showActiveOutline(index: number) {
+              const cell = this.cells[index];
+
+              this.activeOutline.visible = true;
+
+              this.activeOutline.x = cell.x - this.activeOutlinePadding.left;
+              this.activeOutline.y = cell.y - this.activeOutlinePadding.top;
+
+              this.activeOutline.width = this.cellSize + this.activeOutlinePadding.width + this.cellPadding.width;
+              this.activeOutline.height = this.cellSize + this.activeOutlinePadding.height + this.cellPadding.height;
+          }
+
+          updateInteraction() {
+              if (!this.copy) return;
+
+              if (!actions.Secondary.down) {
+                  this.secondaryUsedCells.clear();
+              }
+
+              for (const cell of this.cells) {
+
+                  const bounds = cell.getBounds();
+
+                  if (
+                      pointer.xui >= bounds.x &&
+                      pointer.xui <= bounds.x + bounds.width &&
+                      pointer.yui >= bounds.y &&
+                      pointer.yui <= bounds.y + bounds.height
+                  ) {
+                      this.showHover(cell);
+
+                      if (actions.Primary.pressed) {
+                          this.switchStack(cell);
+                      }
+
+                      if (actions.Secondary.down) {
+
+                          if (!this.secondaryUsedCells.has(cell.index)) {
+                              this.addToStack(cell);
+
+                              this.secondaryUsedCells.add(cell.index);
+                          }
+                      }
+
+                      return;
+                  }
+              }
+
+              this.hover.visible = false;
+          }
+
+          addToStack(cell: Cell) {
+              if (Inventory.mouseStack.isEmpty()) {
+                  return;
+              }
+
+              const success = this.source.addToStack(cell.index, Inventory.mouseStack.itemId);
+
+              if (success) {
+                  Inventory.mouseStack.count--;
+              }
+          }
+
+          switchStack(cell: Cell) {
+              const targetStack = this.source.stacks[cell.index];
+              if (!Inventory.mouseStack.isEmpty() && Inventory.mouseStack.itemId == targetStack.itemId) {
+                  const item = Item.get(targetStack.itemId);
+
+                  const sum = Inventory.mouseStack.count + targetStack.count;
+                  if (sum > item.stackSize) {
+                      this.source.setStack(cell.index, new Stack(item.stackSize, item.id));
+                      Inventory.mouseStack.count = sum - item.stackSize;
+                  } else {
+                      this.source.setStack(cell.index, new Stack(sum, item.id));
+                      Inventory.mouseStack.setEmpty();
+                  }
+              } else {
+                  Inventory.mouseStack = this.source.setStack(cell.index, Inventory.mouseStack);
+              }
+
+          }
+
+          getCell(x: number, y: number, index: number): Cell {
+              return new Cell(
+                  index,
+                  x,
+                  y,
+                  getUiTexture(this.styleIndex, this.cellType),
+                  this.cellSize,
+                  this.cellPadding
+              );
+          }
+      }
   - name: items
     code: |
       class PistolItem extends Item {
@@ -559,21 +1216,24 @@ scripts:
 
       const PISTOL = new PistolItem({
           name: "PISTOL",
-          textureIndex: 0,
+          texture: "items",
+          frame: 0,
           readableName: "Pistol",
           stackSize: 1
       })
 
       const FLASHLIGHT = new Item({
           name: "FLASHLIGHT",
-          textureIndex: 1,
+          texture: "items",
+          frame: 1,
           readableName: "Flashlight",
           stackSize: 1
       })
 
       const DINAMITE = new Item({
           name: "DINAMITE",
-          textureIndex: 2,
+          texture: "items",
+          frame: 2,
           readableName: "Dinamite",
           stackSize: 20
       })
@@ -582,7 +1242,8 @@ scripts:
       const GRASSY_DIRT = new Block({
           name: "GRASSY_DIRT",
           texture: "grassy-dirt",
-          renderLayer: 39
+          renderLayer: 39,
+          lootTable: new LootTable(new Stack(1, DINAMITE.id))
       });
 
       const GRASS_1 = new Block({
@@ -894,573 +1555,36 @@ scripts:
       //     .addRule(LIGHT_STONE)
       //     .addRule(ICY_SNOW, { minDetail: 0.5 })
       //     .addRule(SNOW);
-  - name: globals
+  - name: entities
     code: |-
-      const SKY_TOP = -100;
-      const SURFACE_TOP = 0;
-      const UNDERGROUND_TOP = 30;
-      const DEEPTS_TOP = 600;
-      const MAP_BOTTOM = 700;
-
-      const COLLISION_CATEGORY_PLAYER = 0x0001;
-      const COLLISION_CATEGORY_SHIP = 0x0002;
-      const COLLISION_CATEGORY_WORLD = 0x0004;
-
-      const UI_SCALE = 3;
-
-      PIXI.settings.ROUND_PIXELS = true;
-
-      let isDebugMode: boolean = false;
-      let world: World;
-  - name: ui
-    code: |-
-      class Padding {
-          left: number = 0;
-          top: number = 0;
-          right: number = 0;
-          bottom: number = 0;
-
-          width: number;
-          height: number;
-
-          constructor(left: number = 0, top: number = 0, right: number = 0, bottom: number = 0) {
-              this.left = left;
-              this.top = top;
-              this.right = right;
-              this.bottom = bottom;
-
-              this.width = this.left + this.right;
-              this.height = this.bottom + this.top;
-          }
-      }
-
-      class Stack {
-          count: number;
+      type StackData = EntityData & {
           itemId: number;
-
-          constructor(count: number = 0, itemId: number = 0) {
-              this.count = count;
-              this.itemId = itemId;
-          }
-
-          isEmpty(): boolean {
-              return this.count == 0
-                  || this.itemId == 0
-                  || !Item.has(this.itemId);
-          }
-
-          setEmpty() {
-              this.count = 0;
-              this.itemId = 0;
-          }
+          count: number;
       }
 
-      class Inventory {
-          static mouseStack: Stack = new Stack();
-
-          columns: number;
-          rows: number;
-          stacks: Stack[];
-          listeners: ((index: number) => void)[] = [];
-          overflowInventory?: Inventory;
-          targetInventory?: Inventory
-
-          constructor(columns: number, rows: number) {
-              this.columns = columns;
-              this.rows = rows;
-              this.stacks = Array.from({ length: columns * rows }, () => new Stack())
+      class StackEntity extends Entity<StackData> {
+          static {
+              Entity.register("item-stack", new StackEntity());
           }
 
-          addListener(fn: (index: number) => void) {
-              this.listeners.push(fn);
+          serialize(copy: BasicCopy): StackData {
+
+              const base = super.serialize(copy);
+
+              return {
+                  ...base,
+                  itemId: copy.stack.itemId,
+                  count: copy.stack.count
+              };
           }
 
-          notify(index: number) {
-              for (const fn of this.listeners) {
-                  fn(index);
-              }
-          }
-
-          setStack(index: number, stack: Stack): Stack {
-              const oldStack = this.stacks[index];
-
-              this.stacks[index] = stack;
-
-              this.notify(index);
-
-              return oldStack;
-          }
-
-          addToStack(index: number, itemId: number): boolean {
-              const item = Item.get(itemId);
-
-              if (!item) {
-                  return false;
-              }
-
-              const stack = this.stacks[index];
-
-              if (stack.isEmpty()) {
-                  this.stacks[index] = new Stack(1, item.id);
-                  this.notify(index);
-                  return true;
-              }
-
-              if (stack.itemId == item.id && stack.count < item.stackSize) {
-                  stack.count++;
-                  this.notify(index);
-                  return true;
-              }
-
-              return false;
-          }
-
-          addStack(itemId: number, count: number = 1): number {
-              const item = Item.get(itemId);
-
-              if (!item) {
-                  return 0;
-              }
-
-              const overflow = !!this.overflowInventory ? this.overflowInventory.stacks : []
-
-              const existingStack = [...this.stacks, ...overflow].find(
-                  stack =>
-                      stack.itemId === item.id &&
-                      stack.count < item.stackSize
-              );
-
-              if (existingStack) {
-                  const newCount = existingStack.count + count;
-
-                  if (newCount <= item.stackSize) {
-                      existingStack.count += count;
-                      this.notify(this.stacks.indexOf(existingStack));
-
-                      return count;
-                  }
-
-                  existingStack.count = item.stackSize;
-                  this.notify(this.stacks.indexOf(existingStack));
-
-                  const rest = newCount - item.stackSize;
-                  return this.addStack(item.id, rest);
-              }
-
-              const emptyStack = this.stacks.find(stack => stack.itemId == 0);
-
-              if (emptyStack) {
-                  if (count <= item.stackSize) {
-                      emptyStack.itemId = item.id;
-                      emptyStack.count = count;
-
-                      this.notify(this.stacks.indexOf(emptyStack));
-                      return count;
-                  }
-
-                  emptyStack.itemId = item.id;
-                  emptyStack.count = item.stackSize;
-                  this.notify(this.stacks.indexOf(emptyStack));
-
-                  return count + this.addStack(item.id, count - item.stackSize)
-
-              } else if (!!this.overflowInventory) {
-                  return this.overflowInventory.addStack(itemId, count);
-              } else {
-                  return 0;
-              }
-          }
-      }
-
-      class Cell extends PIXI.Container {
-          index: number;
-
-          frame: PIXI.NineSlicePlane;
-          icon: PIXI.Sprite;
-          text: PIXI.BitmapText;
-
-          padding: Padding;
-          cellSize: number;
-
-          constructor(
-              index: number,
-              x: number,
-              y: number,
-              texture: PIXI.Texture,
-              cellSize: number,
-              padding: Padding
-          ) {
-              super();
-
-              this.index = index;
-              this.cellSize = cellSize;
-              this.padding = padding;
-
-              this.position.set(x, y);
-
-              this.frame = new PIXI.NineSlicePlane(texture);
-              this.frame.width = cellSize + padding.width;
-              this.frame.height = cellSize + padding.height;
-
-              this.addChild(this.frame);
-
-              this.icon = new PIXI.Sprite();
-              this.icon.visible = false;
-              this.icon.position.set(padding.left, padding.top);
-              this.icon.width = cellSize;
-              this.icon.height = cellSize;
-
-              this.addChild(this.icon);
-
-              this.text = new PIXI.BitmapText("", {
-                  fontName: "monogram",
-                  fontSize: 16,
-                  align: "left"
-              });
-
-              this.text.filters = InventoryUi.textFilters;
-
-              this.text.visible = false;
-
-              this.addChild(this.text);
-          }
-
-          setStack(stack: Stack) {
-              if (!stack || stack.itemId === 0 || stack.count === 0) {
-                  this.icon.visible = false;
-                  this.text.visible = false;
-                  return;
-              }
-
-              const item = Item.get(stack.itemId);
-              if (!item) return;
-
-              this.icon.texture = res.getTexture("items", item.textureIndex);
-              this.icon.visible = true;
-
-              if (stack.count > 1) {
-                  this.text.text = stack.count.toString();
-                  this.text.position.set(
-                      this.padding.left + this.cellSize - this.text.width,
-                      this.padding.right + this.cellSize - this.text.height * 0.8
-                  );
-
-                  this.text.visible = true;
-              } else {
-                  this.text.visible = false;
-              }
-          }
-      }
-
-      type InventoryUiOptions = {
-          cellSize?: number;
-          cellGap?: number;
-          styleIndex?: number;
-          cellType?: UiType;
-          cellPadding?: Padding;
-          hoverPadding?: Padding;
-          panelPadding?: Padding;
-          activeOutlinePadding?: Padding;
-      }
-
-      class InventoryUi {
-          static mouseContainer: PIXI.Container;
-          static mouseIcon: PIXI.Sprite;
-          static mouseText: PIXI.BitmapText;
-          static initialized: boolean;
-          static textFilters: PIXI.Filter[] = [new PIXI.filters.OutlineFilter(UI_SCALE, 0x000000, 1, 1)];
-
-          styleIndex: number;
-
-          root: PIXI.Container;
-
-          panel: PIXI.NineSlicePlane;
-          hover: PIXI.NineSlicePlane;
-          activeOutline: PIXI.NineSlicePlane;
-          cells: Cell[];
-          secondaryUsedCells: Set<number> = new Set();
-
-          cellSize: number;
-          cellGap: number;
-          cellType: UiType;
-
-          cellPadding: Padding;
-          activeOutlinePadding: Padding;
-          hoverPadding: Padding;
-          panelPadding: Padding;
-
-          copy: CopyContainer | null;
-
-          source: Inventory;
-
-          constructor(source: Inventory, options: InventoryUiOptions = {}) {
-              const {
-                  styleIndex = 1,
-                  panelPadding = new Padding(8, 8, 8, 8),
-                  cellPadding = new Padding(2, 2, 2, 2),
-                  hoverPadding = new Padding(-2, -2, -2, -2),
-                  activeOutlinePadding = new Padding(2, 2, 2, 2),
-                  cellGap = 1,
-                  cellType = UiType.Frame,
-                  cellSize = 16
-              } = options;
-
-              this.styleIndex = styleIndex;
-              this.source = source;
-              this.cellPadding = cellPadding;
-              this.hoverPadding = hoverPadding;
-              this.panelPadding = panelPadding;
-              this.cellGap = cellGap;
-              this.cellType = cellType;
-              this.cellSize = cellSize;
-              this.activeOutlinePadding = activeOutlinePadding;
-              this.root = new PIXI.Container();
-              this.root.scale.set(UI_SCALE);
-              this.copy = null;
-              this.cells = [];
-              this.source.addListener((index) => {
-                  const cell = this.cells[index];
-                  if (!cell) return;
-
-                  const stack = this.source.stacks[index];
-                  cell.setStack(stack);
-              });
-          }
-
-          static renderMouseStack() {
-              const stack = Inventory.mouseStack;
-
-              if (!stack || stack.isEmpty()) {
-                  if (this.mouseContainer) {
-                      this.mouseContainer.visible = false;
-                  }
-                  return;
-              }
-
-              const item = Item.get(stack.itemId);
-              if (!item) return;
-
-              if (!this.initialized) {
-                  this.mouseContainer = new PIXI.Container();
-                  this.mouseContainer.scale.set(UI_SCALE);
-
-                  this.mouseIcon = new PIXI.Sprite();
-                  this.mouseIcon.width = 16;
-                  this.mouseIcon.height = 16;
-
-                  this.mouseText = new PIXI.BitmapText("", {
-                      fontName: "monogram",
-                      fontSize: 16
-                  });
-
-                  this.mouseText.filters = InventoryUi.textFilters;
-
-                  this.mouseContainer.addChild(this.mouseIcon);
-                  this.mouseContainer.addChild(this.mouseText);
-
-                  rooms.list["ui"][0].addChild(this.mouseContainer);
-
-                  this.initialized = true;
-              }
-
-              this.mouseContainer.visible = true;
-
-              this.mouseIcon.texture = res.getTexture("items", item.textureIndex);
-
-              this.mouseContainer.position.set(pointer.xui, pointer.yui);
-
-              if (stack.count > 1) {
-                  this.mouseText.text = stack.count.toString();
-
-                  this.mouseText.position.set(
-                      16 - this.mouseText.width,
-                      16 - this.mouseText.height * 0.8
-                  );
-
-                  this.mouseText.visible = true;
-              } else {
-                  this.mouseText.visible = false;
-              }
-          }
-
-          setCopy(copy: CopyContainer) {
-              this.generate();
-
-              if (this.copy) {
-                  this.copy.removeChild(this.root);
-              }
-
-              this.copy = copy;
-              this.root.removeChildren();
-              this.root.addChild(this.panel);
-
-              for (const cell of this.cells) {
-                  this.root.addChild(cell);
-              }
-
-              this.root.addChild(this.hover);
-              this.root.addChild(this.activeOutline);
-
-              copy.addChild(this.root);
-
-              this.root.pivot.set(
-                  this.panel.width / 2,
-                  this.panel.height / 2
-              );
-
-              for (const cell of this.cells) {
-                  const stack = this.source.stacks[cell.index];
-                  cell.setStack(stack);
-              }
-          }
-
-          generate() {
-              if (!this.panel) {
-                  this.panel = new PIXI.NineSlicePlane(getUiTexture(this.styleIndex, UiType.Panel));
-              }
-
-              if (!this.hover) {
-                  this.hover = new PIXI.NineSlicePlane(
-                      res.getTexture("white", 0),
-                      11, 11, 11, 11
-                  );
-                  this.hover.alpha = 0.2;
-                  this.hover.visible = false;
-              }
-
-              if (!this.activeOutline) {
-                  this.activeOutline = new PIXI.NineSlicePlane(
-                      getUiTexture(this.styleIndex, UiType.Outline),
-                      11, 11, 11, 11
-                  );
-
-                  this.activeOutline.visible = false;
-              }
-
-              this.cells.length = 0;
-
-              let drawX = this.panelPadding.left;
-              let drawY = this.panelPadding.top;
-              let index = 0;
-
-              for (let y = 0; y < this.source.rows; y++) {
-                  drawX = this.panelPadding.left;
-
-                  for (let x = 0; x < this.source.columns; x++) {
-                      const cell = this.getCell(drawX, drawY, index);
-                      this.cells.push(cell);
-
-                      drawX += this.cellPadding.width + this.cellSize + this.cellGap;
-                      index++;
-                  }
-                  drawY += this.cellPadding.height + this.cellSize + this.cellGap;
-              }
-
-              this.panel.width = drawX + this.panelPadding.right - this.cellGap;
-              this.panel.height = drawY + this.panelPadding.bottom - this.cellGap;
-          }
-
-          showHover(cell: Cell) {
-              this.hover.visible = true;
-
-              this.hover.x = cell.x - this.hoverPadding.left;
-              this.hover.y = cell.y - this.hoverPadding.top;
-
-              this.hover.width = cell.width + this.hoverPadding.width;
-              this.hover.height = cell.height + this.hoverPadding.height;
-          }
-
-          showActiveOutline(index: number) {
-              const cell = this.cells[index];
-
-              this.activeOutline.visible = true;
-
-              this.activeOutline.x = cell.x - this.activeOutlinePadding.left;
-              this.activeOutline.y = cell.y - this.activeOutlinePadding.top;
-
-              this.activeOutline.width = this.cellSize + this.activeOutlinePadding.width + this.cellPadding.width;
-              this.activeOutline.height = this.cellSize + this.activeOutlinePadding.height + this.cellPadding.height;
-          }
-
-          updateInteraction() {
-              if (!this.copy) return;
-
-              if (!actions.Secondary.down) {
-                  this.secondaryUsedCells.clear();
-              }
-
-              for (const cell of this.cells) {
-
-                  const bounds = cell.getBounds();
-
-                  if (
-                      pointer.xui >= bounds.x &&
-                      pointer.xui <= bounds.x + bounds.width &&
-                      pointer.yui >= bounds.y &&
-                      pointer.yui <= bounds.y + bounds.height
-                  ) {
-                      this.showHover(cell);
-
-                      if (actions.Primary.pressed) {
-                          this.switchStack(cell);
-                      }
-
-                      if (actions.Secondary.down) {
-
-                          if (!this.secondaryUsedCells.has(cell.index)) {
-                              this.addToStack(cell);
-
-                              this.secondaryUsedCells.add(cell.index);
-                          }
-                      }
-
-                      return;
-                  }
-              }
-
-              this.hover.visible = false;
-          }
-
-          addToStack(cell: Cell) {
-              if (Inventory.mouseStack.isEmpty()) {
-                  return;
-              }
-
-              const success = this.source.addToStack(cell.index, Inventory.mouseStack.itemId);
-
-              if (success) {
-                  Inventory.mouseStack.count--;
-              }
-          }
-
-          switchStack(cell: Cell) {
-              const targetStack = this.source.stacks[cell.index];
-              if (!Inventory.mouseStack.isEmpty() && Inventory.mouseStack.itemId == targetStack.itemId) {
-                  const item = Item.get(targetStack.itemId);
-
-                  const sum = Inventory.mouseStack.count + targetStack.count;
-                  if (sum > item.stackSize) {
-                      this.source.setStack(cell.index, new Stack(item.stackSize, item.id));
-                      Inventory.mouseStack.count = sum - item.stackSize;
-                  } else {
-                      this.source.setStack(cell.index, new Stack(sum, item.id));
-                      Inventory.mouseStack.setEmpty();
-                  }
-              } else {
-                  Inventory.mouseStack = this.source.setStack(cell.index, Inventory.mouseStack);
-              }
-
-          }
-
-          getCell(x: number, y: number, index: number): Cell {
-              return new Cell(
-                  index,
-                  x,
-                  y,
-                  getUiTexture(this.styleIndex, this.cellType),
-                  this.cellSize,
-                  this.cellPadding
-              );
+          deserialize(data: StackData, params: any = {}) {
+              params = {
+                  ...params,
+                  stack: new Stack(data.count, data.itemId)
+              };
+
+              super.deserialize(data, params);
           }
       }
   - name: debug
@@ -1550,6 +1674,8 @@ scripts:
           temperatureNoiseMap: NoiseMap;
           humidityNoiseMap: NoiseMap;
           detailNoiseMap: NoiseMap;
+
+          entities: Set<BasicCopy> = new Set();
 
           private dirtyLight = true;
 
@@ -2340,6 +2466,7 @@ scripts:
                   y: cy,
                   blocks,
                   backgroundBlocks,
+                  entities: [],
                   tilemap: tilemaps.create(-1),
                   damage: new Map(),
                   backgroundDamage: new Map(),
@@ -2349,14 +2476,14 @@ scripts:
               };
           }
 
-          updateChunkVisibility(camera: PIXI.Rectangle) {
+          updateChunkVisibility(cameraBounds: Rectangle) {
               const chunkWorldSize = this.chunkSize * this.cellSize;
 
-              const startX = Math.floor((camera.x - this.x) / chunkWorldSize);
-              const endX = Math.floor((camera.x + camera.width - this.x) / chunkWorldSize);
+              const startX = Math.floor((cameraBounds.x - this.x) / chunkWorldSize);
+              const endX = Math.floor((cameraBounds.x + cameraBounds.width - this.x) / chunkWorldSize);
 
-              const startY = Math.floor((camera.y - this.y) / chunkWorldSize);
-              const endY = Math.floor((camera.y + camera.height - this.y) / chunkWorldSize);
+              const startY = Math.floor((cameraBounds.y - this.y) / chunkWorldSize);
+              const endY = Math.floor((cameraBounds.y + cameraBounds.height - this.y) / chunkWorldSize);
 
               if (!Number.isFinite(startX) ||
                   !Number.isFinite(endX) ||
@@ -2507,8 +2634,8 @@ scripts:
                           {
                               isStatic: true,
                               collisionFilter: {
-                                  category: COLLISION_CATEGORY_WORLD,
-                                  mask: COLLISION_CATEGORY_PLAYER | COLLISION_CATEGORY_SHIP
+                                  category: CollisionCategory.Block,
+                                  mask: CollisionCategory.Player | CollisionCategory.Entity
                               }
                           }
                       );
@@ -2531,7 +2658,7 @@ scripts:
               chunk.bodies = undefined;
           }
 
-          drawChunkBorders(container: PIXI.Container): PIXI.Graphics {
+          drawChunkBorders(container: Container): Graphics {
               const graphics = new PIXI.Graphics();
 
               const chunkWorldSize = this.chunkSize * this.cellSize;
@@ -2615,18 +2742,27 @@ scripts:
               const chunk = this.chunkManager.get(cx, cy);
               if (!chunk) return;
 
+              const entities = [];
+
+              for (const copy of this.entities) {
+                  
+                  if (!copy.serialize) continue;
+
+                  const { worldX, worldY } = this.getWorldIndex(copy.x, copy.y);
+
+                  const ecx = Math.floor(worldX / this.chunkSize);
+                  const ecy = Math.floor(worldY / this.chunkSize);
+
+                  if (ecx === cx && ecy === cy) {
+                      entities.push(copy.serialize());
+                      copy.kill = true;
+                  }
+              }
+
+              chunk.entities = entities;
+
               this.destroyChunkPhysics(chunk);
               this.destroyChunkBackground(chunk);
-
-              if (chunk.lightOverlay) {
-                  chunk.lightOverlay.destroy();
-                  chunk.lightOverlay = undefined;
-              }
-
-              if (chunk.damageOverlay) {
-                  chunk.damageOverlay.destroy();
-                  chunk.damageOverlay = undefined;
-              }
           }
 
           private buildChunk(cx: number, cy: number) {
@@ -2647,6 +2783,13 @@ scripts:
               this.markDamageDirty(chunk);
               chunk.dirtyLighting = true;
               this.dirtyLight = true;
+
+              if (chunk.entities) {
+                  for (const entity of chunk.entities) {
+                      const entityType = EntityRegistry.get(entity.template);
+                      entityType.deserialize(entity);
+                  }
+              }
           }
 
           private getRatioCenter(
@@ -2783,16 +2926,17 @@ scripts:
 
               const index = localY * this.chunkSize + localX;
 
-              const tileId = chunk.blocks[index];
-              if (!tileId) return;
+              const blockId = chunk.blocks[index];
+              if (!blockId) return;
 
-              const tile = Block.get(tileId);
-              if (!tile) return;
+              const block = Block.get(blockId);
+              if (!block) return;
 
               const currentDamage = chunk.damage.get(index) ?? 0;
               const newDamage = currentDamage + amount;
 
-              if (newDamage >= tile.maxHp) {
+              if (newDamage >= block.maxHp) {
+                  block.onDestroyed(worldX, worldY);
                   this.changeBlockByIndex(worldX, worldY, 0);
               }
 
@@ -3927,6 +4071,34 @@ assets:
             uid: BM9TP5nhjNQfd2
             padding: 1
             isBlank: false
+          - lastmod: 1772769191010
+            type: texture
+            name: no-texture-round
+            untill: 0
+            grid:
+              - 1
+              - 1
+            axis:
+              - 8
+              - 8
+            marginx: 0
+            marginy: 0
+            imgWidth: 16
+            imgHeight: 16
+            width: 16
+            height: 16
+            offx: 0
+            offy: 0
+            origname: iMJ7PnNpNczKdPL.png
+            shape: circle
+            left: 8
+            right: 8
+            top: 8
+            bottom: 8
+            uid: MJ7PnNpNczKdPL
+            padding: 1
+            isBlank: false
+            r: 8
       - type: folder
         uid: 37rBjdJ5Pjcb1g
         colorClass: error
@@ -3990,7 +4162,7 @@ assets:
             padding: 1
             isBlank: false
             source: 'C:\Users\Chico\Downloads\ship.png'
-          - lastmod: 1772677467527
+          - lastmod: 1772763476543
             type: texture
             name: items
             untill: 0
@@ -4607,7 +4779,7 @@ assets:
           matterRopeStiffness: 0
           matterRopeDamping: 0
           cursorpointer: false
-        lastmod: 1772673650279
+        lastmod: 1772776341230
         uid: dmjhq981DBCJ5H
         behaviors: []
         extendTypes: |-
@@ -4917,6 +5089,8 @@ assets:
             lib: core
             code: |-
               this.update();
+              this.hand
+
               if(!!this.hand) {
                   this.hand.update();
               }
@@ -4983,7 +5157,7 @@ assets:
               }
             arguments: {}
           - eventKey: OnCreate
-            code: >
+            code: >-
               camera.follow = this;
 
 
@@ -5005,6 +5179,15 @@ assets:
               Item.get(this.inventoryHotbar.stacks[this.hotbarSelectedIndex].itemId);
 
               this.inventoryHotbar.overflowInventory = this.inventory;
+
+              this.inventoryHotbar.addListener(
+                  () => this.hand = Item.get(
+                      this.inventoryHotbar.stacks[this.hotbarSelectedIndex].itemId
+                  )
+              );
+
+
+              this.inventoryHotbar.addStack(PISTOL.id, 1);
 
 
               const uiRoom = rooms.list['ui'][0];
@@ -5073,8 +5256,8 @@ assets:
 
 
               this.matterBody.collisionFilter = {
-                  category: COLLISION_CATEGORY_PLAYER,
-                  mask: COLLISION_CATEGORY_WORLD
+                  category: CollisionCategory.Player,
+                  mask: CollisionCategory.Block
               }
 
 
@@ -5167,7 +5350,7 @@ assets:
           lightOpacity: false
           lightScale: 0
           cursorpointer: false
-        lastmod: 1772682570043
+        lastmod: 1772769089029
         uid: HbdjfWPTmMR79j
         behaviors:
           - pd8grnPh27DHL7
@@ -5266,7 +5449,7 @@ assets:
           matterRopeLength: 0
           matterRopeStiffness: 0
           matterRopeDamping: 0
-        lastmod: 1772674610636
+        lastmod: 1772776343079
         uid: 9QQqNPkkB44HCw
         behaviors: []
         extendTypes: |-
@@ -5322,6 +5505,32 @@ assets:
               matterBody: Matter.Body;
             lastmod: 1772294372977
             uid: pd8grnPh27DHL7
+          - type: behavior
+            name: entity
+            behaviorType: template
+            events:
+              - eventKey: OnCreate
+                code: |-
+                  const entityType = Entity.get(this.template);
+
+                  if(!entityType) {
+                      console.log(`Failed to find '${this.template}' as an entity type.`);
+                      return;
+                  }
+
+                  world.entities.add(this);
+
+                  this.serialize = () => entityType.serialize(this);
+                arguments: {}
+                lib: core
+              - eventKey: OnDestroy
+                code: world.entities.delete(this);
+                arguments: {}
+                lib: core
+            specification: []
+            extendTypes: ''
+            lastmod: 1772776199619
+            uid: 43WdcbDq6wKCpn
       - type: template
         baseClass: AnimatedSprite
         name: cursor
@@ -5388,6 +5597,72 @@ assets:
         uid: M5bzN3f29GjrdM
         behaviors: []
         extendTypes: 'inventoryUi: InventoryUi;'
+      - type: template
+        baseClass: AnimatedSprite
+        name: item-stack
+        depth: 0
+        texture: MJ7PnNpNczKdPL
+        playAnimationOnStart: false
+        loopAnimation: true
+        animationFPS: 30
+        visible: true
+        events:
+          - eventKey: OnCreate
+            code: >-
+              this.matterBody.restitution = 0;
+
+              Matter.Body.setMass(this.matterBody, 1);
+
+              Matter.Body.setInertia(this.matterBody, Infinity);
+
+
+              this.matterBody.collisionFilter = {
+                  category: CollisionCategory.Entity,
+                  mask: CollisionCategory.Block
+              }
+
+
+              const item = Item.get(this.stack.itemId);
+
+
+              if (!!item) {
+                  this.tex = item.texture;
+                  this.currentFrame = item.frame;
+              }
+
+
+              if (this.reloading) {
+                  return;
+              }
+
+
+              Matter.Body.setVelocity(this.matterBody, {x: 0.1 - 0.2 *
+              random.range(0, 1), y: 0})
+            arguments: {}
+            lib: core
+          - eventKey: OnStep
+            code: ''
+            arguments: {}
+            lib: core
+        extends:
+          cgroup: ''
+          matterEnable: true
+          matterStatic: false
+          matterSensor: false
+          matterDensity: 0
+          matterRestitution: 0
+          matterFriction: 0
+          matterFrictionStatic: 0
+          matterFrictionAir: 0.02
+          matterFixPivot:
+            - 0
+            - 0
+        lastmod: 1772775666482
+        uid: dhGWLDBbjjf2jM
+        behaviors:
+          - pd8grnPh27DHL7
+          - 43WdcbDq6wKCpn
+        extendTypes: 'stack: Stack;'
   - type: folder
     uid: p9DchCCMDrmQkb
     colorClass: text
@@ -5895,10 +6170,8 @@ assets:
           let maxCameraScale = isDebugMode ? 4 : 1.2;
 
           if (actions.Scroll.pressed && actions.Extra.down) {
-              camera.scale.x += actions.Scroll.value * 0.2;
-              camera.scale.x = u.clamp(0.2, camera.scale.x, maxCameraScale);
-
-              camera.scale.y = camera.scale.x;
+              const multiplier = actions.Scroll.value < 0 ? 0.5 : 2;
+              camera.scale.set(u.clamp(0.125, camera.scale.x * multiplier, maxCameraScale));
           }
 
           if (actions.DebugToggle.pressed) {
@@ -5916,15 +6189,15 @@ assets:
         language: typescript
         variables: []
         runAutomatically: false
-        lastmod: 1772347008044
+        lastmod: 1772776318240
         type: script
       - uid: cmGtf6w9P2pNDN
         name: CameraSetup
-        code: ''
+        code: camera.scale.set(0.5);
         language: typescript
         variables: []
-        runAutomatically: false
-        lastmod: 1772678595998
+        runAutomatically: true
+        lastmod: 1772776320818
         type: script
 globalVars: []
 settings:
