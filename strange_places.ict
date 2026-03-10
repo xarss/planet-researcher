@@ -2786,7 +2786,7 @@ scripts:
 
               if (chunk.entities) {
                   for (const entity of chunk.entities) {
-                      const entityType = EntityRegistry.get(entity.template);
+                      const entityType = Entity.get(entity.template);
                       entityType.deserialize(entity);
                   }
               }
@@ -4755,6 +4755,10 @@ assets:
               Debug.set("FPS", () => Math.round(pixiApp.ticker.FPS));
 
               Debug.set("Camera Scale", () => camera.scale.x);
+
+              Debug.set("Hovered Block", () => {
+                const block = Block.get(world.chunkManager.get)  
+              })
             arguments: {}
             lib: core
         extends:
@@ -4779,7 +4783,7 @@ assets:
           matterRopeStiffness: 0
           matterRopeDamping: 0
           cursorpointer: false
-        lastmod: 1772776341230
+        lastmod: 1773107013502
         uid: dmjhq981DBCJ5H
         behaviors: []
         extendTypes: |-
