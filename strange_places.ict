@@ -1,7 +1,7 @@
 ctjsVersion: 5.2.1
 backups: 3
 language: typescript
-notes: /* empty */
+notes: ''
 libs:
   place:
     gridX: 1024
@@ -174,8 +174,8 @@ scripts:
           const heightSharpness = 1 / 50000;
           return Math.exp(-Math.pow(difference, 2) * heightSharpness) * weight;
       }
-  - name: globals
-    code: |-
+  - name: configs
+    code: |+
       const SKY_TOP = -100;
       const SURFACE_TOP = 0;
       const UNDERGROUND_TOP = 30;
@@ -186,18 +186,14 @@ scripts:
       const BLOCK_SIZE = 16;
       const BLOCK_OFFSET = BLOCK_SIZE / 2;
 
-      enum CollisionCategory {
-          Player = 0x0001,
-          Entity = 0x0002,
-          Block = 0x0004,
-      }
-
       const UI_SCALE = 3;
+
+      const UI_STYLE_SHEET_COLUMNS = 6;
+      const UI_STYLE_SHEET_ROWS = 5;
+      const UI_STYLE_SHEET_NAME = "ui";
 
       PIXI.settings.ROUND_PIXELS = true;
 
-      let isDebugMode: boolean = false;
-      let world: World;
   - name: enums
     code: |-
       enum BiomeLayer {
@@ -216,9 +212,11 @@ scripts:
           ButtonActive
       }
 
-      const styleSheetColumns = 6;
-      const styleSheetRows = 5;
-      const styleSheetName = "ui";
+      enum CollisionCategory {
+          Player = 0x0001,
+          Entity = 0x0002,
+          Block = 0x0004,
+      }
 
       function getUiTexture(index: number, uiType: UiType): Texture  {
           const frame = index * styleSheetColumns + uiType;
@@ -276,6 +274,23 @@ scripts:
       }
   - name: classes
     code: |-
+      type Listener<T> = (event: T) => void;
+
+      class Event<T = void> {
+        private listeners = new Set<Listener<T>>();
+
+        subscribe(listener: Listener<T>): () => void {
+          this.listeners.add(listener);
+          return () => this.listeners.delete(listener);
+        }
+
+        emit(event: T extends void ? never : T): void {
+          for (const listener of [...this.listeners]) {
+            listener(event as T);
+          }
+        }
+      }
+
       type ChunkOptions = {
           x: number;
           y: number;
@@ -3092,6 +3107,14 @@ scripts:
               this.dirtyLight = true;
           }
       }
+  - name: globals
+    code: |-
+      let isDebugMode: boolean = false;
+      let world: World;
+
+      let gameEvents = {
+          playerSpawned: new Event<BasicCopy>()
+      }
 assets:
   - type: folder
     uid: M43dcc8Fnb5Dhc
@@ -4853,7 +4876,7 @@ assets:
           matterRopeStiffness: 0
           matterRopeDamping: 0
           cursorpointer: false
-        lastmod: 1773107013502
+        lastmod: 1773524703226
         uid: dmjhq981DBCJ5H
         behaviors: []
         extendTypes: |-
@@ -5138,7 +5161,7 @@ assets:
           lightColor: '#ffffff'
           lightOpacity: false
           lightScale: 0
-        lastmod: 1772207992327
+        lastmod: 1773524713514
         uid: LtRfC9N814gd1C
         behaviors:
           - pd8grnPh27DHL7
@@ -5163,7 +5186,6 @@ assets:
             lib: core
             code: |-
               this.update();
-              this.hand
 
               if(!!this.hand) {
                   this.hand.update();
@@ -5416,7 +5438,7 @@ assets:
           lightOpacity: false
           lightScale: 0
           cursorpointer: false
-        lastmod: 1773454341490
+        lastmod: 1773526296223
         uid: HbdjfWPTmMR79j
         behaviors:
           - pd8grnPh27DHL7
@@ -5569,7 +5591,7 @@ assets:
               currentBiome: Biome;
               localGravity: number;
               matterBody: Matter.Body;
-            lastmod: 1773454341514
+            lastmod: 1773524700195
             uid: pd8grnPh27DHL7
           - type: behavior
             name: entity
@@ -6255,7 +6277,7 @@ assets:
         language: typescript
         variables: []
         runAutomatically: false
-        lastmod: 1773457500071
+        lastmod: 1773526299589
         type: script
       - uid: cmGtf6w9P2pNDN
         name: CameraSetup
@@ -6265,12 +6287,20 @@ assets:
         runAutomatically: true
         lastmod: 1772776320818
         type: script
+      - uid: qz34mdfmLPmqRf
+        name: SpawnPlayer
+        code: ''
+        language: typescript
+        variables: []
+        runAutomatically: false
+        lastmod: 1773526302036
+        type: script
 globalVars: []
 settings:
   authoring:
-    author: chico
-    site: 'https://chicobento.itch.io/'
-    title: chico
+    author: xarss
+    site: 'https://xarss.itch.io/'
+    title: xarss
     version:
       - 0
       - 1
