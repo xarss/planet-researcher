@@ -8,10 +8,10 @@ Planet Researcher is a procedural exploration game originally created for the [*
 The initial jam version was developed in a week and published on itch.io as a small experimental prototype.
 
 🔗 Initial Jam Version:
-[https://chicobento.itch.io/strange-caves](https://chicobento.itch.io/strange-caves)
+[https://xarss.itch.io/strange-caves](https://xarss.itch.io/strange-caves)
 
 🔗 Current Version:
-[https://chicobento.itch.io/planet-researcher](https://chicobento.itch.io/planet-researcher)
+[https://xarss.itch.io/planet-researcher](https://xarss.itch.io/planet-researcher)
 
 ---
 
