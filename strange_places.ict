@@ -182,6 +182,10 @@ scripts:
       const DEEPTS_TOP = 600;
       const MAP_BOTTOM = 700;
 
+      const CHUNK_SIZE = 32;
+      const BLOCK_SIZE = 16;
+      const BLOCK_OFFSET = BLOCK_SIZE / 2;
+
       enum CollisionCategory {
           Player = 0x0001,
           Entity = 0x0002,
@@ -235,9 +239,53 @@ scripts:
           maxRatioHeight?: number;
       }
 
-      type Chunk = {
+      /**
+       * Represents a point in **pixel** coordinates.
+       * Normal output from `pointer.x` and copy's `this.x`.
+       */
+      interface Point {
           x: number;
           y: number;
+      }
+
+      /**
+       * Represents a position in **world block coordinates**.
+       * Used for block indexing and chunk calculations.
+       */
+      interface WorldPosition {
+          x: number;
+          y: number;
+      }
+
+      /**
+       * Represents the chunk position in the chunk's grid.
+       * It's the `chunk.x` and `chunk.y` values.
+       */
+      interface ChunkPosition {
+          x: number;
+          y: number;
+      }
+
+      /**
+       * Represents the block position in the chunk's block list.
+       * It's the `chunk.blocks[index]` where `index` is `chunk_size * blockPosition.y + blockPosition.x`
+       */
+      interface BlockPosition {
+          x: number;
+          y: number;
+      }
+  - name: classes
+    code: |-
+      type ChunkOptions = {
+          x: number;
+          y: number;
+          blocks: Uint8Array;
+          backgroundBlocks: Uint8Array;
+      }
+
+      class Chunk {
+          private x: number;
+          private y: number;
 
           blocks: Uint8Array;
           backgroundBlocks: Uint8Array;
@@ -261,9 +309,236 @@ scripts:
           dirtyLighting?: boolean;
           dirtyPhysics?: boolean;
           dirtyDamage?: boolean;
+
+          constructor(options: ChunkOptions) {
+              const {
+                  x,
+                  y,
+                  blocks,
+                  backgroundBlocks,
+              } = options;
+
+              this.x = x;
+              this.y = y;
+              this.blocks = blocks;
+              this.backgroundBlocks = backgroundBlocks;
+
+              this.entities = [];
+              this.tilemap = tilemaps.create(-1);
+              this.damage = new Map();
+              this.backgroundDamage = new Map();
+              this.light = new Uint8Array(CHUNK_SIZE * CHUNK_SIZE);
+              this.dirtyLighting = true;
+              this.lightOverlay = undefined;
+          }
+
+          static positionFromKey(key: string): ChunkPosition {
+              const [x, y] = key.split(',').map(Number);
+
+              return { x, y };
+          }
+
+          static positionFromWorldPosition(worldPosition: WorldPosition): ChunkPosition {
+              return {
+                  x: Math.floor(worldPosition.x / CHUNK_SIZE),
+                  y: Math.floor(worldPosition.y / CHUNK_SIZE)
+              }
+          }
+
+          getPointByPosition(world: World, blockPosition: BlockPosition, anchor: "topLeft" | "center" = "topLeft"): { x: number, y: number } {
+              return world.pointFromPosition(this.getWorldPosition(blockPosition), anchor);
+          }
+
+          destroyBackground() {
+              if (!this.background) return;
+
+              this.background.destroy();
+              this.background = undefined;
+          }
+
+          getPosition(): ChunkPosition {
+              return {
+                  x: this.x,
+                  y: this.y
+              }
+          }
+
+          getWorldPosition(blockPosition: BlockPosition = { x: 0, y: 0 }): WorldPosition {
+              const pos = this.getPosition();
+
+              return {
+                  x: pos.x * CHUNK_SIZE + blockPosition.x,
+                  y: pos.y * CHUNK_SIZE + blockPosition.y
+              };
+          }
+
+          getBlockPositionByIndex(index: number): BlockPosition {
+              return {
+                  x: index % CHUNK_SIZE,
+                  y: (index / CHUNK_SIZE) | 0
+              };
+          }
+
+          getBlockIndexByBlockPosition(blockPosition: BlockPosition): number {
+              if (
+                  blockPosition.x < 0 ||
+                  blockPosition.x >= CHUNK_SIZE ||
+                  blockPosition.y < 0 ||
+                  blockPosition.y >= CHUNK_SIZE
+              ) return -1;
+
+              return blockPosition.y * CHUNK_SIZE + blockPosition.x;
+          }
+
+          getBlockIndexByWorldPosition(worldPosition: WorldPosition): number {
+              const blockPosition = this.getBlockPositionByWorldPosition(worldPosition);
+
+              if (!blockPosition) {
+                  return -1;
+              }
+
+              return this.getBlockIndexByBlockPosition(blockPosition);
+          }
+
+          getBlockPositionByWorldPosition(worldPosition: WorldPosition): BlockPosition | null {
+              const x = worldPosition.x - this.x * CHUNK_SIZE;
+              const y = worldPosition.y - this.y * CHUNK_SIZE;
+
+              if (
+                  x < 0 || x >= CHUNK_SIZE ||
+                  y < 0 || y >= CHUNK_SIZE
+              ) {
+                  return null;
+              }
+
+              return { x, y };
+          }
+
+          isBlockSolidByPosition(blockPosition: BlockPosition) {
+              return this.isBlockSolidByIndex(this.getBlockIndexByBlockPosition(blockPosition));
+          }
+
+          isBlockSolidByIndex(index: number) {
+              return this.blocks[index] !== 0;
+          }
+
+          markGeometryDirty() {
+              this.dirtyGeometry = true;
+          }
+
+          markPhysicsDirty() {
+              this.dirtyPhysics = true;
+          }
+
+          markDamageDirty() {
+              this.dirtyDamage = true;
+          }
+
+          buildPhysics(world: World) {
+              if (this.bodies) return;
+
+              const bodies: Matter.Body[] = [];
+              const visited = new Array(CHUNK_SIZE * CHUNK_SIZE).fill(false);
+
+              for (let y = 0; y < CHUNK_SIZE; y++) {
+                  for (let x = 0; x < CHUNK_SIZE; x++) {
+
+                      const index = this.getBlockIndexByBlockPosition({ x, y });
+                      if (visited[index] || !this.isBlockSolidByIndex(index)) continue;
+
+                      let width = 1;
+                      while (
+                          x + width < CHUNK_SIZE &&
+                          this.isBlockSolidByIndex(this.getBlockIndexByBlockPosition({ x: x + width, y })) &&
+                          !visited[this.getBlockIndexByBlockPosition({ x: x + width, y })]
+                      ) {
+                          width++;
+                      }
+
+                      let height = 1;
+                      outer: while (y + height < CHUNK_SIZE) {
+                          for (let dx = 0; dx < width; dx++) {
+                              const blockPosition = { x: x + dx, y: y + height };
+                              const blockIndex = this.getBlockIndexByBlockPosition(blockPosition);
+
+                              if (
+                                  !this.isBlockSolidByIndex(blockIndex) ||
+                                  visited[blockIndex]
+                              ) {
+                                  break outer;
+                              }
+                          }
+                          height++;
+                      }
+
+                      for (let dy = 0; dy < height; dy++) {
+                          for (let dx = 0; dx < width; dx++) {
+                              const index = this.getBlockIndexByBlockPosition({ x: x + dx, y: y + dy });
+
+                              visited[index] = true;
+                          }
+                      }
+
+                      const point = world.pointFromPosition(this.getWorldPosition({ x, y }));
+                      point.x += width * BLOCK_SIZE * 0.5;
+                      point.y += height * BLOCK_SIZE * 0.5;
+
+                      const body = Matter.Bodies.rectangle(
+                          point.x,
+                          point.y,
+                          width * BLOCK_SIZE,
+                          height * BLOCK_SIZE,
+                          {
+                              isStatic: true,
+                              collisionFilter: {
+                                  category: CollisionCategory.Block,
+                                  mask: CollisionCategory.Player | CollisionCategory.Entity
+                              }
+                          }
+                      );
+
+                      Matter.World.add(world.matterEngine.world, body);
+                      bodies.push(body);
+                  }
+              }
+
+              this.bodies = bodies;
+          }
+
+          destroyPhysics(world: World) {
+              if (!this.bodies) return;
+
+              for (const body of this.bodies) {
+                  Matter.World.remove(world.matterEngine.world, body);
+              }
+
+              this.bodies = undefined;
+          }
+
+          update(world: World) {
+              if (this.dirtyGeometry) {
+                  world.rebuildGraphics(this);
+                  this.dirtyGeometry = false;
+              }
+
+              if (this.dirtyLighting) {
+                  world.rebuildLightOverlay(this);
+                  this.dirtyLighting = false;
+              }
+
+              if (this.dirtyPhysics) {
+                  this.destroyPhysics(world);
+                  this.buildPhysics(world);
+                  this.dirtyPhysics = false;
+              }
+
+              if (this.dirtyDamage) {
+                  world.rebuildDamageOverlay(this);
+                  this.dirtyDamage = false;
+              }
+          }
       };
-  - name: classes
-    code: |-
+
       class LootTable {
           result: Stack;
 
@@ -427,12 +702,12 @@ scripts:
           onDamaged() { }
           onPlaced() { }
           onSecondary() { }
-          onDestroyed(worldX: number, worldY: number) {
+          onDestroyed(worldPosition: WorldPosition) {
               if (!this.lootTable) {
                   return;
               }
 
-              const { x, y } = world.getCoordByIndex(worldX, worldY, "center");
+              const { x, y } = world.pointFromPosition(worldPosition, "center");
 
               for (const stack of this.lootTable.next()) {
                   templates.copy('item-stack', x, y, { stack: stack });
@@ -556,24 +831,24 @@ scripts:
       class ChunkManager {
           chunks = new Map<string, Chunk>();
 
-          getKey(x: number, y: number) {
-              return `${x},${y}`;
+          getKey(chunkPosition: ChunkPosition) {
+              return `${chunkPosition.x},${chunkPosition.y}`;
           }
 
-          get(x: number, y: number) {
-              return this.chunks.get(this.getKey(x, y));
+          getByKey(key: string) {
+              return this.chunks.get(key);
+          }
+
+          get(chunkPosition: ChunkPosition) {
+              return this.chunks.get(this.getKey(chunkPosition));
           }
 
           set(chunk: Chunk) {
-              this.chunks.set(this.getKey(chunk.x, chunk.y), chunk);
+              this.chunks.set(this.getKey(chunk.getPosition()), chunk);
           }
 
-          delete(x: number, y: number) {
-              this.chunks.delete(this.getKey(x, y));
-          }
-
-          getIndex(x: number, y: number, size: number) {
-              return y * size + x;
+          delete(chunkPosition: ChunkPosition) {
+              this.chunks.delete(this.getKey(chunkPosition));
           }
       }
 
@@ -1194,17 +1469,17 @@ scripts:
           update() {
               if (actions.Primary.down) {
                   if (this.isBuildMode) {
-                      world.changeBlock(pointer.x, pointer.y, DIRT.id);
+                      world.changeBlock(pointer, DIRT.id);
                   } else {
-                      world.damageBlock(pointer.x, pointer.y, this.damagePerSecond * u.time);
+                      world.damageBlock(pointer, this.damagePerSecond * u.time);
                   }
               }
 
               if (actions.Secondary.down) {
                   if (this.isBuildMode) {
-                      world.changeBackgroundBlock(pointer.x, pointer.y, DIRT.id);
+                      world.changeBackgroundBlock(pointer, DIRT.id);
                   } else {
-                      world.damageBackgroundBlock(pointer.x, pointer.y, this.damagePerSecond * u.time);
+                      world.damageBackgroundBlock(pointer, this.damagePerSecond * u.time);
                   }
               }
 
@@ -1656,16 +1931,12 @@ scripts:
   - name: world
     code: |
       type WorldOptions = {
-          cellSize?: number;
           seed?: string;
       }
 
       class World {
           x: number;
           y: number;
-
-          cellSize: number;
-          chunkSize: number;
 
           matterEngine: Matter.Engine;
           layers: LayerDefinition[];
@@ -1692,7 +1963,6 @@ scripts:
 
           constructor(matterEngine: Matter.Engine, params: WorldOptions = {}) {
               const {
-                  cellSize = 16,
                   seed
               } = params;
 
@@ -1700,10 +1970,6 @@ scripts:
               this.y = 0;
 
               this.matterEngine = matterEngine;
-              this.cellSize = cellSize;
-
-              this.chunkSize = 32;
-              this.cellOffset = this.cellSize / 2;
 
               this.seed = stringToSeed(seed ?? Date.now().toString());
               this.random = random.createSeededRandomizer(this.seed);
@@ -1768,35 +2034,31 @@ scripts:
                       if (!!b && b.onCollisionActive) b.onCollisionActive(pair.bodyA, pair);
                   }
               });
-
-              // this.matterEngine.enableSleeping = true;
           }
 
-          private getLightKey(x: number, y: number) {
-              return `${x},${y}`;
+          private getLightKey(worldPosition: WorldPosition) {
+              return `${worldPosition.x},${worldPosition.y}`;
           }
 
-          addLightSource(worldX: number, worldY: number, intensity: number) {
-              const key = this.getLightKey(worldX, worldY);
+          addLightSource(worldPosition: WorldPosition, intensity: number) {
+              const key = this.getLightKey(worldPosition);
               this.lightSources.set(key, intensity);
               this.dirtyLight = true;
           }
 
-          removeLightSource(worldX: number, worldY: number) {
-              const key = this.getLightKey(worldX, worldY);
+          removeLightSource(worldPosition: WorldPosition) {
+              const key = this.getLightKey(worldPosition);
               this.lightSources.delete(key);
               this.dirtyLight = true;
           }
 
           private recalculateLight() {
-              const size = this.chunkSize;
-
               for (const key of this.visibleChunks) {
-                  const [cx, cy] = key.split(',').map(Number);
-                  let chunk = this.chunkManager.get(cx, cy);
+                  const chunkPosition = Chunk.positionFromKey(key);
+                  let chunk = this.chunkManager.get(chunkPosition);
+
                   if (!chunk) {
-                      this.buildChunk(cx, cy);
-                      chunk = this.chunkManager.get(cx, cy);
+                      chunk = this.buildChunk(chunkPosition);
                       chunk.dirtyLighting = true;
                   };
 
@@ -1807,45 +2069,38 @@ scripts:
               let head = 0;
 
               for (const key of this.visibleChunks) {
-                  const [cx, cy] = key.split(',').map(Number);
-                  const chunk = this.chunkManager.get(cx, cy);
+                  const chunkPosition = Chunk.positionFromKey(key);
+                  const chunk = this.chunkManager.get(chunkPosition);
                   if (!chunk) continue;
 
-                  const baseWorldX = cx * size;
-                  const baseWorldY = cy * size;
-
                   for (let i = 0; i < chunk.blocks.length; i++) {
-                      const tileId = chunk.blocks[i];
+                      const blockId = chunk.blocks[i];
 
                       let emission = 0;
 
-                      const localX = i % size;
-                      const localY = (i / size) | 0;
+                      const blockPosition = chunk.getBlockPositionByIndex(i);
+                      const worldPosition = chunk.getWorldPosition(blockPosition);
 
-                      const worldX = baseWorldX + localX;
-                      const worldY = baseWorldY + localY;
-
-                      if (tileId === 0) {
+                      if (blockId === 0) {
                           const backgroundTileId = chunk.backgroundBlocks[i];
 
                           if (backgroundTileId === 0) {
-                              // Use biome ambient light instead of hardcoded 15
-                              const biome = this.getBiome(worldX, worldY);
+                              const biome = this.getBiome(worldPosition);
                               emission = biome.ambientLight ?? 0;
                           } else {
                               const block = Block.get(backgroundTileId);
                               emission = block?.lightEmission ?? 0;
                           }
                       } else {
-                          const block = Block.get(tileId);
+                          const block = Block.get(blockId);
                           emission = block?.lightEmission ?? 0;
                       }
 
                       if (emission <= 0) continue;
 
                       queue.push({
-                          x: baseWorldX + localX,
-                          y: baseWorldY + localY,
+                          x: worldPosition.x,
+                          y: worldPosition.y,
                           light: emission
                       });
                   }
@@ -1865,22 +2120,13 @@ scripts:
 
                   if (light <= 0) continue;
 
-                  const cx = Math.floor(x / size);
-                  const cy = Math.floor(y / size);
-                  const chunk = this.chunkManager.get(cx, cy);
+                  const chunkPosition = Chunk.positionFromWorldPosition({ x, y });
+                  const chunk = this.chunkManager.get(chunkPosition);
                   if (!chunk) continue;
 
-                  const localX = x - cx * size;
-                  const localY = y - cy * size;
+                  const index = chunk.getBlockIndexByWorldPosition({ x, y });
 
-                  if (
-                      localX < 0 || localX >= size ||
-                      localY < 0 || localY >= size
-                  ) continue;
-
-                  const index = localY * size + localX;
-
-                  if (chunk.light[index] >= light) continue;
+                  if (index == -1 || chunk.light[index] >= light) continue;
 
                   chunk.light[index] = light;
                   chunk.dirtyLighting = true;
@@ -1890,100 +2136,71 @@ scripts:
 
                   // Right
                   {
-                      const nx = x + 1;
-                      const ny = y;
-                      const blockId = this.getBlock(nx, ny);
+                      const neighbourPosition = {
+                          x: x + 1,
+                          y
+                      };
+                      const blockId = this.getBlockId(neighbourPosition);
 
-                      let opacity = 0;
+                      const opacity = Block.get(blockId)?.lightOpacity ?? 0;
 
-                      if (blockId) {
-                          opacity = Block.get(blockId)?.lightOpacity ?? 0;
-                      } else {
-                          const bgId = this.getBackgroundBlock(nx, ny);
-
-                          if (bgId) {
-                              opacity = 0;
-                          } else {
-                              opacity = 0;
-                          }
-                      }
-
-                      const nl = nextLightBase - opacity;
-                      if (nl > 0) queue.push({ x: nx, y: ny, light: nl });
+                      const neighbourLight = nextLightBase - opacity;
+                      if (neighbourLight > 0) queue.push({
+                          ...neighbourPosition,
+                          light: neighbourLight
+                      });
                   }
                   // Left
                   {
-                      const nx = x - 1;
-                      const ny = y;
-                      const blockId = this.getBlock(nx, ny);
+                      const neighbourPosition = {
+                          x: x - 1,
+                          y
+                      };
+                      const blockId = this.getBlockId(neighbourPosition);
 
-                      let opacity = 0;
+                      const opacity = Block.get(blockId)?.lightOpacity ?? 0;
 
-                      if (blockId) {
-                          opacity = Block.get(blockId)?.lightOpacity ?? 0;
-                      } else {
-                          const bgId = this.getBackgroundBlock(nx, ny);
-
-                          if (bgId) {
-                              opacity = 0;
-                          } else {
-                              opacity = 0;
-                          }
-                      }
-
-                      const nl = nextLightBase - opacity;
-                      if (nl > 0) queue.push({ x: nx, y: ny, light: nl });
+                      const neighbourLight = nextLightBase - opacity;
+                      if (neighbourLight > 0) queue.push({
+                          ...neighbourPosition, light: neighbourLight
+                      });
                   }
                   // Down
                   {
-                      const nx = x;
-                      const ny = y + 1;
-                      const blockId = this.getBlock(nx, ny);
+                      const neighbourPosition = {
+                          x,
+                          y: y + 1
+                      };
+                      const blockId = this.getBlockId(neighbourPosition);
 
-                      let opacity = 0;
-
-                      if (blockId) {
-                          opacity = Block.get(blockId)?.lightOpacity ?? 0;
-                      } else {
-                          const bgId = this.getBackgroundBlock(nx, ny);
-
-                          if (bgId) {
-                              opacity = 0;
-                          } else {
-                              opacity = 0;
-                          }
-                      }
+                      const opacity = Block.get(blockId)?.lightOpacity ?? 0;
 
                       const nl = nextLightBase - opacity;
-                      if (nl > 0) queue.push({ x: nx, y: ny, light: nl });
+                      if (nl > 0) queue.push({
+                          ...neighbourPosition,
+                          light: nl
+                      });
                   }
                   // Up
                   {
-                      const nx = x;
-                      const ny = y - 1;
-                      const blockId = this.getBlock(nx, ny);
+                      const neighbourPosition = {
+                          x,
+                          y: y - 1
+                      };
+                      const blockId = this.getBlockId(neighbourPosition);
 
-                      let opacity = 0;
-
-                      if (blockId) {
-                          opacity = Block.get(blockId)?.lightOpacity ?? 0;
-                      } else {
-                          const bgId = this.getBackgroundBlock(nx, ny);
-
-                          if (bgId) {
-                              opacity = 0;
-                          } else {
-                              opacity = 0;
-                          }
-                      }
+                      const opacity = Block.get(blockId)?.lightOpacity ?? 0;
 
                       const nl = nextLightBase - opacity;
-                      if (nl > 0) queue.push({ x: nx, y: ny, light: nl });
+                      if (nl > 0) queue.push({
+                          ...neighbourPosition,
+                          light: nl
+                      });
                   }
               }
           }
 
-          private rebuildDamageOverlay(chunk: Chunk) {
+          rebuildDamageOverlay(chunk: Chunk) {
               if (chunk.damageOverlay) {
                   chunk.damageOverlay.destroy();
               }
@@ -1993,31 +2210,23 @@ scripts:
               }
 
               const overlay = tilemaps.create(-1);
-              overlay.zIndex = 9999;
-
-              const size = this.chunkSize;
+              overlay.zIndex = 9999;;
 
               for (const [index, damage] of chunk.damage) {
+                  const block = Block.get(chunk.blocks[index]);
+                  if (!block) continue;
 
-                  const tileId = chunk.blocks[index];
-                  if (!tileId) continue;
+                  const percent = damage / block.maxHp;
 
-                  const tile = Block.get(tileId);
-                  if (!tile) continue;
+                  const blockPosition = chunk.getBlockPositionByIndex(index);
 
-                  const percent = damage / tile.maxHp;
-
-                  const localX = index % size;
-                  const localY = Math.floor(index / size);
-
-                  const { x: worldX, y: worldY } =
-                      this.getCoordsByChunkIndex(chunk, { x: localX, y: localY }, "center");
+                  const point = chunk.getPointByPosition(this, blockPosition, "center");
 
                   const frame =
                       percent < 0.33 ? 0 :
                           percent < 0.66 ? 1 : 2;
 
-                  overlay.addTile("crack", worldX, worldY, frame).alpha = 0.5;
+                  overlay.addTile("crack", point.x, point.y, frame).alpha = 0.5;
               }
 
               const backgroundOverlay = tilemaps.create(-1);
@@ -2027,25 +2236,20 @@ scripts:
 
                   if (chunk.blocks[index] !== 0) continue;
 
-                  const tileId = chunk.backgroundBlocks[index];
-                  if (!tileId) continue;
+                  const block = Block.get(chunk.backgroundBlocks[index]);
+                  if (!block) continue;
 
-                  const tile = Block.get(tileId);
-                  if (!tile) continue;
+                  const percent = damage / block.maxHp;
 
-                  const percent = damage / tile.maxHp;
+                  const blockPosition = chunk.getBlockPositionByIndex(index);
 
-                  const localX = index % size;
-                  const localY = Math.floor(index / size);
-
-                  const { x: worldX, y: worldY } =
-                      this.getCoordsByChunkIndex(chunk, { x: localX, y: localY }, "center");
+                  const point = chunk.getPointByPosition(this, blockPosition, "center");
 
                   const frame =
                       percent < 0.33 ? 0 :
                           percent < 0.66 ? 1 : 2;
 
-                  const crack = backgroundOverlay.addTile("crack", worldX, worldY, frame);
+                  const crack = backgroundOverlay.addTile("crack", point.x, point.y, frame);
                   crack.alpha = 0.4;
               }
 
@@ -2053,86 +2257,14 @@ scripts:
               chunk.backgroundDamageOverlay = backgroundOverlay;
           }
 
-          private markGeometryDirty(chunk: Chunk) {
-              chunk.dirtyGeometry = true;
-          }
-
-          private markPhysicsDirty(chunk: Chunk) {
-              chunk.dirtyPhysics = true;
-          }
-
-          private markDamageDirty(chunk: Chunk) {
-              chunk.dirtyDamage = true;
-          }
-
-          private rebuildGraphics(chunk: Chunk) {
-              const { x: cx, y: cy } = chunk;
-
-              if (chunk.tilemap) {
-                  chunk.tilemap.destroy();
+          positionByChunkPosition(
+              chunkPosition: ChunkPosition,
+              blockPosition: BlockPosition = { x: 0, y: 0 }
+          ): WorldPosition {
+              return {
+                  x: chunkPosition.x * CHUNK_SIZE + blockPosition.x,
+                  y: chunkPosition.y * CHUNK_SIZE + blockPosition.y
               }
-
-              const tilemap = tilemaps.create(-1);
-              rooms.current.addChild(tilemap);
-
-              const size = this.chunkSize;
-
-              for (let gx = 0; gx < size; gx++) {
-                  for (let gy = 0; gy < size; gy++) {
-
-                      const worldX = cx * size + gx;
-                      const worldY = cy * size + gy;
-
-                      const ids = [
-                          this.getBlock(worldX - 1, worldY - 1),
-                          this.getBlock(worldX, worldY - 1),
-                          this.getBlock(worldX - 1, worldY),
-                          this.getBlock(worldX, worldY)
-                      ];
-
-                      const blocks = ids
-                          .map(id => id !== 0 ? Block.get(id) : undefined)
-                          .filter(Boolean) as Block[];
-
-                      const uniqueLayers = [...new Set(blocks.map(t => t.renderLayer))];
-
-                      for (const layer of uniqueLayers) {
-
-                          const tl = (Block.get(ids[0])?.renderLayer === layer) ? 1 : 0;
-                          const tr = (Block.get(ids[1])?.renderLayer === layer) ? 1 : 0;
-                          const bl = (Block.get(ids[2])?.renderLayer === layer) ? 1 : 0;
-                          const br = (Block.get(ids[3])?.renderLayer === layer) ? 1 : 0;
-
-                          const mask = (tl << 3) | (tr << 2) | (bl << 1) | br;
-                          if (mask === 0) continue;
-
-                          const { frame, angle } =
-                              this.resolveCornerFrame(mask, worldX, worldY);
-
-                          const px = this.x + worldX * this.cellSize;
-                          const py = this.y + worldY * this.cellSize;
-
-                          const representative =
-                              blocks.find(t => t.renderLayer === layer);
-                          if (!representative) continue;
-
-                          const sprite = tilemap.addTile(
-                              representative.texture,
-                              px,
-                              py,
-                              frame
-                          );
-
-                          sprite.angle = angle;
-                          sprite.tint = representative.tint;
-                      }
-                  }
-              }
-
-              this.buildChunkBackground(chunk);
-
-              chunk.tilemap = tilemap;
-              chunk.dirtyLighting = true;
           }
 
           private getLayerBoundary(layer: BiomeLayer, worldX: number): number {
@@ -2151,41 +2283,21 @@ scripts:
               }
 
               for (const chunk of this.chunkManager.chunks.values()) {
-
-                  if (chunk.dirtyGeometry) {
-                      this.rebuildGraphics(chunk);
-                      chunk.dirtyGeometry = false;
-                  }
-
-                  if (chunk.dirtyLighting) {
-                      this.rebuildLightOverlay(chunk);
-                      chunk.dirtyLighting = false;
-                  }
-
-                  if (chunk.dirtyPhysics) {
-                      this.destroyChunkPhysics(chunk);
-                      this.buildChunkPhysics(chunk);
-                      chunk.dirtyPhysics = false;
-                  }
-
-                  if (chunk.dirtyDamage) {
-                      this.rebuildDamageOverlay(chunk);
-                      chunk.dirtyDamage = false;
-                  }
+                  chunk.update(this);
               }
           }
 
-          getLayerAt(worldX: number, worldY: number): BiomeLayer {
+          getLayerAt(worldPosition: WorldPosition): BiomeLayer {
               for (let i = 0; i < this.layers.length; i++) {
                   const current = this.layers[i];
                   const next = this.layers[i + 1];
 
-                  const currentTop = this.getLayerBoundary(current.id, worldX);
+                  const currentTop = this.getLayerBoundary(current.id, worldPosition.x);
                   const nextTop = next
-                      ? this.getLayerBoundary(next.id, worldX)
+                      ? this.getLayerBoundary(next.id, worldPosition.x)
                       : MAP_BOTTOM;
 
-                  if (worldY >= currentTop && worldY < nextTop) {
+                  if (worldPosition.y >= currentTop && worldPosition.y < nextTop) {
                       return current.id;
                   }
               }
@@ -2193,15 +2305,18 @@ scripts:
               return this.layers[this.layers.length - 1].id;
           }
 
-          getBodiesNear(x: number, y: number, radius: number = 2) {
+          getBodiesNear(worldPosition: WorldPosition, chunkRadius: number = 1) {
               const bodies = [];
 
-              const cx = Math.floor(x / this.chunkSize);
-              const cy = Math.floor(y / this.chunkSize);
+              const chunkPosition = Chunk.positionFromWorldPosition(worldPosition);
 
-              for (let dx = -radius; dx <= radius; dx++) {
-                  for (let dy = -radius; dy <= radius; dy++) {
-                      const chunk = this.chunkManager.get(cx + dx, cy + dy);
+              for (let dx = -chunkRadius; dx <= chunkRadius; dx++) {
+                  for (let dy = -chunkRadius; dy <= chunkRadius; dy++) {
+                      const chunk = this.chunkManager.get({
+                          x: chunkPosition.x + dx,
+                          y: chunkPosition.y + dy
+                      });
+
                       if (chunk?.bodies) {
                           bodies.push(...chunk.bodies);
                       }
@@ -2211,11 +2326,11 @@ scripts:
               return bodies;
           }
 
-          getBiome(worldX: number, worldY: number): Biome {
-              const temperatureNoise = this.temperatureNoiseMap.get(worldX, worldY);
-              const humidityNoise = this.humidityNoiseMap.get(worldX, worldY);
+          getBiome(worldPosition: WorldPosition): Biome {
+              const temperatureNoise = this.temperatureNoiseMap.get(worldPosition.x, worldPosition.y);
+              const humidityNoise = this.humidityNoiseMap.get(worldPosition.x, worldPosition.y);
 
-              const layer = this.getLayerAt(worldX, worldY);
+              const layer = this.getLayerAt(worldPosition);
               const biomes = Biome.getByLayer(layer);
 
               let bestBiome: Biome | null = null;
@@ -2247,6 +2362,10 @@ scripts:
               }
 
               if (!bestBiome) {
+                  console.log(worldPosition);
+                  console.log(layer);
+                  console.log(biomes);
+
                   throw new Error("No biomes registered");
               }
 
@@ -2255,19 +2374,18 @@ scripts:
 
           private selectBiomeBackgroundBlock(
               biome: Biome,
-              worldX: number,
-              worldY: number
+              worldPosition: WorldPosition
           ): number {
 
-              const ratioCenter = this.getRatioCenter(biome, worldX, worldY);
-              const detail = this.detailNoiseMap.get(worldX, worldY);
-              const { bottom, top } = this.getBiomeVerticalBounds(biome.layer, worldX);
+              const ratioCenter = this.getRatioCenter(biome, worldPosition);
+              const detail = this.detailNoiseMap.get(worldPosition.x, worldPosition.y);
+              const { bottom, top } = this.getBiomeVerticalBounds(biome.layer, worldPosition.x);
 
               const biomeHeight = Math.abs(bottom - top);
 
               const ratioHeight =
                   biomeHeight !== 0
-                      ? 1 - (worldY - top) / biomeHeight
+                      ? 1 - (worldPosition.y - top) / biomeHeight
                       : 0;
 
               for (const rule of biome.backgroundRules) {
@@ -2275,8 +2393,8 @@ scripts:
                   if (rule.maxRatioCenter !== undefined && ratioCenter > rule.maxRatioCenter) continue;
                   if (rule.minDetail !== undefined && detail < rule.minDetail) continue;
                   if (rule.maxDetail !== undefined && detail > rule.maxDetail) continue;
-                  if (rule.minRawHeight !== undefined && worldY < rule.minRawHeight) continue;
-                  if (rule.maxRawHeight !== undefined && worldY > rule.maxRawHeight) continue;
+                  if (rule.minRawHeight !== undefined && worldPosition.y < rule.minRawHeight) continue;
+                  if (rule.maxRawHeight !== undefined && worldPosition.y > rule.maxRawHeight) continue;
                   if (rule.minRatioHeight !== undefined && ratioHeight < rule.minRatioHeight) continue;
                   if (rule.maxRatioHeight !== undefined && ratioHeight > rule.maxRatioHeight) continue;
 
@@ -2286,47 +2404,56 @@ scripts:
               return 0;
           }
 
-          private getBackgroundBlock(worldX: number, worldY: number): number {
-              const cx = Math.floor(worldX / this.chunkSize);
-              const cy = Math.floor(worldY / this.chunkSize);
+          private getBackgroundBlockId(worldPosition: WorldPosition): number {
+              const chunkPosition = Chunk.positionFromWorldPosition(worldPosition);
 
-              const chunk = this.chunkManager.get(cx, cy);
+              const chunk = this.chunkManager.get(chunkPosition);
 
               if (chunk) {
-                  const localX = ((worldX % this.chunkSize) + this.chunkSize) % this.chunkSize;
-                  const localY = ((worldY % this.chunkSize) + this.chunkSize) % this.chunkSize;
+                  const index = chunk.getBlockIndexByWorldPosition(worldPosition);
 
-                  return chunk.backgroundBlocks[localY * this.chunkSize + localX];
+                  return index != -1 ? chunk.backgroundBlocks[index] : 0;
               }
 
-              const biome = this.getBiome(worldX, worldY);
-              return this.selectBiomeBackgroundBlock(biome, worldX, worldY);
+              const biome = this.getBiome(worldPosition);
+              return this.selectBiomeBackgroundBlock(biome, worldPosition);
           }
 
-          private buildChunkBackground(chunk: Chunk) {
-              const { x: cx, y: cy } = chunk;
+          pointFromPosition(worldPosition: WorldPosition, anchor: "topLeft" | "center" = "topLeft"): Point {
+              const offset = anchor == "topLeft" ? 0 : BLOCK_OFFSET;
 
+              return {
+                  x: this.x + worldPosition.x * BLOCK_SIZE + offset,
+                  y: this.y + worldPosition.y * BLOCK_SIZE + offset
+              }
+          }
+
+          buildChunkBackground(chunk: Chunk) {
               if (chunk.background) {
                   chunk.background.destroy();
               }
 
-              const tilemap = tilemaps.create(-1);
-              tilemap.zIndex = -5;
+              const tilemap = tilemaps.create(-5);
               rooms.current.addChild(tilemap);
 
-              const size = this.chunkSize;
-
-              for (let gx = -1; gx <= size; gx++) {
-                  for (let gy = -1; gy <= size; gy++) {
-
-                      const worldX = cx * size + gx;
-                      const worldY = cy * size + gy;
+              for (let x = -1; x <= CHUNK_SIZE; x++) {
+                  for (let y = -1; y <= CHUNK_SIZE; y++) {
+                      const worldPosition = chunk.getWorldPosition({ x, y });
 
                       const ids = [
-                          this.getBackgroundBlock(worldX - 1, worldY - 1),
-                          this.getBackgroundBlock(worldX, worldY - 1),
-                          this.getBackgroundBlock(worldX - 1, worldY),
-                          this.getBackgroundBlock(worldX, worldY)
+                          this.getBackgroundBlockId({
+                              x: worldPosition.x - 1,
+                              y: worldPosition.y - 1
+                          }),
+                          this.getBackgroundBlockId({
+                              x: worldPosition.x,
+                              y: worldPosition.y - 1
+                          }),
+                          this.getBackgroundBlockId({
+                              x: worldPosition.x - 1,
+                              y: worldPosition.y
+                          }),
+                          this.getBackgroundBlockId(worldPosition)
                       ];
 
                       const uniqueIds = [...new Set(ids.filter(id => id !== 0))];
@@ -2341,18 +2468,17 @@ scripts:
                           const mask = (tl << 3) | (tr << 2) | (bl << 1) | br;
                           if (mask === 0) continue;
 
-                          const { frame, angle } = this.resolveCornerFrame(mask, worldX, worldY);
+                          const { frame, angle } = this.resolveCornerFrame(mask, worldPosition);
 
-                          const px = this.x + worldX * this.cellSize;
-                          const py = this.y + worldY * this.cellSize;
+                          const point = this.pointFromPosition(worldPosition);
 
                           const block = Block.get(id);
                           if (!block) continue;
 
                           const sprite = tilemap.addTile(
                               block.texture,
-                              px,
-                              py,
+                              point.x,
+                              point.y,
                               frame
                           );
 
@@ -2379,7 +2505,7 @@ scripts:
               );
           }
 
-          private resolveCornerFrame(mask: number, worldX: number, worldY: number): { frame: number, angle: 0 | 90 | 180 | 270 } {
+          private resolveCornerFrame(mask: number, worldPosition: WorldPosition): { frame: number, angle: 0 | 90 | 180 | 270 } {
               for (let rotation = 0; rotation < 4; rotation++) {
                   switch (mask) {
                       case 0b0001:
@@ -2391,7 +2517,7 @@ scripts:
                       case 0b1101:
                           return { frame: 3, angle: (rotation * 90) as 0 | 90 | 180 | 270 };
                       case 0b1111: {
-                          const n = this.hash2D(worldX, worldY);
+                          const n = this.hash2D(worldPosition);
                           const rotIndex = Math.floor(n * 4);
                           return {
                               frame: 4,
@@ -2406,78 +2532,65 @@ scripts:
               return { frame: 0, angle: 0 };
           }
 
-          private destroyChunkBackground(chunk: Chunk) {
-              if (!chunk.background) return;
+          private invalidateChunksAroundBlock(chunkPosition: ChunkPosition, blockPosition: BlockPosition) {
+              const mark = (base: ChunkPosition, offset: ChunkPosition = { x: 0, y: 0 }) => {
+                  const pos = {
+                      x: base.x + offset.x,
+                      y: base.y + offset.y
+                  };
 
-              chunk.background.destroy();
-              chunk.background = undefined;
-          }
-
-          private invalidateChunksAroundTile(cx: number, cy: number, localX: number, localY: number) {
-              const size = this.chunkSize;
-
-              const mark = (x: number, y: number) => {
-                  const chunk = this.chunkManager.get(x, y);
-                  if (chunk) this.markGeometryDirty(chunk);
+                  const chunk = this.chunkManager.get(pos);
+                  if (chunk) chunk.markGeometryDirty();
               };
 
-              mark(cx, cy);
+              mark(chunkPosition);
 
-              if (localX === 0) mark(cx - 1, cy);
-              if (localX === size - 1) mark(cx + 1, cy);
-              if (localY === 0) mark(cx, cy - 1);
-              if (localY === size - 1) mark(cx, cy + 1);
+              if (blockPosition.x === 0) mark(chunkPosition, { x: -1, y: 0 });
+              if (blockPosition.x === CHUNK_SIZE - 1) mark(chunkPosition, { x: 1, y: 0 });
+              if (blockPosition.y === 0) mark(chunkPosition, { x: 0, y: -1 });
+              if (blockPosition.y === CHUNK_SIZE - 1) mark(chunkPosition, { x: 0, y: 1 });
 
-              if (localX === 0 && localY === 0) mark(cx - 1, cy - 1);
-              if (localX === size - 1 && localY === 0) mark(cx + 1, cy - 1);
-              if (localX === 0 && localY === size - 1) mark(cx - 1, cy + 1);
-              if (localX === size - 1 && localY === size - 1) mark(cx + 1, cy + 1);
+              if (blockPosition.x === 0 && blockPosition.y === 0) mark(chunkPosition, { x: -1, y: -1 });
+              if (blockPosition.x === CHUNK_SIZE - 1 && blockPosition.y === 0) mark(chunkPosition, { x: 1, y: -1 });
+              if (blockPosition.x === 0 && blockPosition.y === CHUNK_SIZE - 1) mark(chunkPosition, { x: -1, y: 1 });
+              if (blockPosition.x === CHUNK_SIZE - 1 && blockPosition.y === CHUNK_SIZE - 1) mark(chunkPosition, { x: 1, y: 1 });
           }
 
-          private generateChunk(cx: number, cy: number): Chunk {
-              const size = this.chunkSize;
+          private generateChunk(chunkPosition: ChunkPosition): Chunk {
+              const blocks = new Uint8Array(CHUNK_SIZE * CHUNK_SIZE);
+              const backgroundBlocks = new Uint8Array(CHUNK_SIZE * CHUNK_SIZE);
+              console.log(chunkPosition);
 
-              const blocks = new Uint8Array(size * size);
-              const backgroundBlocks = new Uint8Array(size * size);
+              for (let x = 0; x < CHUNK_SIZE; x++) {
+                  for (let y = 0; y < CHUNK_SIZE; y++) {
+                      const worldPosition = this.positionByChunkPosition(chunkPosition, { x, y })
 
-              for (let x = 0; x < size; x++) {
-                  for (let y = 0; y < size; y++) {
-                      const worldX = cx * size + x;
-                      const worldY = cy * size + y;
-
-                      const biome = this.getBiome(worldX, worldY);
-                      const terrainNoise = this.getWarpedNoise(worldX, worldY);
+                      const biome = this.getBiome(worldPosition);
+                      const terrainNoise = this.getWarpedNoise(worldPosition);
                       const isSolid = terrainNoise < biome.fillPercent;
 
-                      const index = y * size + x;
+                      const index = y * CHUNK_SIZE + x;
 
                       if (!isSolid) {
                           blocks[index] = 0;
                       } else {
-                          blocks[index] = this.selectBiomeBlock(biome, worldX, worldY);
+                          blocks[index] = this.selectBiomeBlock(biome, worldPosition);
                       }
 
-                      backgroundBlocks[index] = this.selectBiomeBackgroundBlock(biome, worldX, worldY);
+                      backgroundBlocks[index] = this.selectBiomeBackgroundBlock(biome, worldPosition);
                   }
               }
 
-              return {
-                  x: cx,
-                  y: cy,
+              return new Chunk({
+                  x: chunkPosition.x,
+                  y: chunkPosition.y,
                   blocks,
-                  backgroundBlocks,
-                  entities: [],
-                  tilemap: tilemaps.create(-1),
-                  damage: new Map(),
-                  backgroundDamage: new Map(),
-                  light: new Uint8Array(size * size),
-                  dirtyLighting: true,
-                  lightOverlay: undefined
-              };
+                  backgroundBlocks
+              });
           }
 
           updateChunkVisibility(cameraBounds: Rectangle) {
-              const chunkWorldSize = this.chunkSize * this.cellSize;
+              const chunkWorldSize = CHUNK_SIZE * BLOCK_SIZE;
 
               const startX = Math.floor((cameraBounds.x - this.x) / chunkWorldSize);
               const endX = Math.floor((cameraBounds.x + cameraBounds.width - this.x) / chunkWorldSize);
@@ -2497,11 +2610,12 @@ scripts:
 
               for (let cx = startX; cx <= endX; cx++) {
                   for (let cy = startY; cy <= endY; cy++) {
-                      const key = this.chunkManager.getKey(cx, cy);
+                      const chunkPosition = { x: cx, y: cy };
+                      const key = this.chunkManager.getKey(chunkPosition);
                       newVisible.add(key);
 
                       if (!this.visibleChunks.has(key)) {
-                          this.buildChunk(cx, cy);
+                          this.buildChunk(chunkPosition);
                           this.dirtyLight = true;
                       }
                   }
@@ -2509,8 +2623,8 @@ scripts:
 
               for (const key of this.visibleChunks) {
                   if (!newVisible.has(key) && !this.isChunkAnchored(key)) {
-                      const [cx, cy] = key.split(',').map(Number);
-                      this.unloadChunk(cx, cy);
+                      const chunkPosition = Chunk.positionFromKey(key);
+                      this.unloadChunk(chunkPosition);
                   }
               }
 
@@ -2534,146 +2648,56 @@ scripts:
               return false;
           }
 
-          private getBlock(worldX: number, worldY: number): number {
-              const cx = Math.floor(worldX / this.chunkSize);
-              const cy = Math.floor(worldY / this.chunkSize);
+          private getBlockId(worldPosition: WorldPosition): number {
+              const chunkPosition = Chunk.positionFromWorldPosition(worldPosition);
 
-              const chunk = this.chunkManager.get(cx, cy);
+              const chunk = this.chunkManager.get(chunkPosition);
 
               if (chunk) {
-                  const localX = ((worldX % this.chunkSize) + this.chunkSize) % this.chunkSize;
-                  const localY = ((worldY % this.chunkSize) + this.chunkSize) % this.chunkSize;
+                  const localX = ((worldPosition.x % CHUNK_SIZE) + CHUNK_SIZE) % CHUNK_SIZE;
+                  const localY = ((worldPosition.y % CHUNK_SIZE) + CHUNK_SIZE) % CHUNK_SIZE;
 
-                  return chunk.blocks[localY * this.chunkSize + localX];
+                  return chunk.blocks[localY * CHUNK_SIZE + localX];
               }
 
-              const biome = this.getBiome(worldX, worldY);
+              const biome = this.getBiome(worldPosition);
 
               if (biome == AIR) {
                   return 0;
               }
 
-              const terrainNoise = this.getWarpedNoise(worldX, worldY);
+              const terrainNoise = this.getWarpedNoise(worldPosition);
 
               const isSolid = terrainNoise < biome.fillPercent;
 
               if (!isSolid) return 0;
-              return this.selectBiomeBlock(biome, worldX, worldY);
+              return this.selectBiomeBlock(biome, worldPosition);
           }
 
-          private getWarpedNoise(x: number, y: number): number {
+          private getWarpedNoise(worldPosition: WorldPosition): number {
               const warp = 20;
 
-              const wx = x + noise.perlin2d(x / 100, y / 100) * warp;
-              const wy = y + noise.perlin2d((x + 999) / 100, (y + 999) / 100) * warp;
+              const wx = worldPosition.x + noise.perlin2d(worldPosition.x / 100, worldPosition.y / 100) * warp;
+              const wy = worldPosition.y + noise.perlin2d((worldPosition.x + 999) / 100, (worldPosition.y + 999) / 100) * warp;
 
               return this.terrainNoiseMap.get(wx, wy);
           }
 
-          private buildChunkPhysics(chunk: Chunk) {
-              if (chunk.bodies) return;
-
-              const bodies: Matter.Body[] = [];
-              const size = this.chunkSize;
-              const visited = new Array(size * size).fill(false);
-
-              const { x: cx, y: cy, blocks } = chunk;
-
-              const isSolid = (x: number, y: number) =>
-                  blocks[y * size + x] !== 0;
-
-              for (let y = 0; y < size; y++) {
-                  for (let x = 0; x < size; x++) {
-
-                      const index = y * size + x;
-                      if (visited[index] || !isSolid(x, y)) continue;
-
-                      let width = 1;
-                      while (
-                          x + width < size &&
-                          isSolid(x + width, y) &&
-                          !visited[y * size + (x + width)]
-                      ) {
-                          width++;
-                      }
-
-                      let height = 1;
-                      outer: while (y + height < size) {
-                          for (let dx = 0; dx < width; dx++) {
-                              if (
-                                  !isSolid(x + dx, y + height) ||
-                                  visited[(y + height) * size + (x + dx)]
-                              ) {
-                                  break outer;
-                              }
-                          }
-                          height++;
-                      }
-
-                      for (let dy = 0; dy < height; dy++) {
-                          for (let dx = 0; dx < width; dx++) {
-                              visited[(y + dy) * size + (x + dx)] = true;
-                          }
-                      }
-
-                      const worldX =
-                          this.x +
-                          (cx * size + x) * this.cellSize +
-                          (width * this.cellSize) / 2;
-
-                      const worldY =
-                          this.y +
-                          (cy * size + y) * this.cellSize +
-                          (height * this.cellSize) / 2;
-
-                      const body = Matter.Bodies.rectangle(
-                          worldX,
-                          worldY,
-                          width * this.cellSize,
-                          height * this.cellSize,
-                          {
-                              isStatic: true,
-                              collisionFilter: {
-                                  category: CollisionCategory.Block,
-                                  mask: CollisionCategory.Player | CollisionCategory.Entity
-                              }
-                          }
-                      );
-
-                      Matter.World.add(this.matterEngine.world, body);
-                      bodies.push(body);
-                  }
-              }
-
-              chunk.bodies = bodies;
-          }
-
-          private destroyChunkPhysics(chunk: Chunk) {
-              if (!chunk.bodies) return;
-
-              for (const body of chunk.bodies) {
-                  Matter.World.remove(this.matterEngine.world, body);
-              }
-
-              chunk.bodies = undefined;
-          }
-
           drawChunkBorders(container: Container): Graphics {
-              const graphics = new PIXI.Graphics();
+              const graphics = new Graphics();
 
-              const chunkWorldSize = this.chunkSize * this.cellSize;
+              const chunkPixelSize = CHUNK_SIZE * BLOCK_SIZE;
 
               graphics.lineStyle(camera.scale.x * 2, 0xff0000, 0.8);
 
               for (const chunk of this.chunkManager.chunks.values()) {
-                  const worldX = this.x + chunk.x * chunkWorldSize;
-                  const worldY = this.y + chunk.y * chunkWorldSize;
+                  const worldPosition = this.pointFromPosition(chunk.getWorldPosition());
 
                   graphics.drawRect(
-                      worldX,
-                      worldY,
-                      chunkWorldSize,
-                      chunkWorldSize
+                      worldPosition.x,
+                      worldPosition.y,
+                      chunkPixelSize,
+                      chunkPixelSize
                   );
               }
 
@@ -2681,17 +2705,17 @@ scripts:
               return graphics;
           }
 
-          private hash2D(x: number, y: number): number {
-              let h = x * 374761393 + y * 668265263 + this.seed;
+          private hash2D(worldPosition: WorldPosition): number {
+              let h = worldPosition.x * 374761393 + worldPosition.y * 668265263 + this.seed;
               h = (h ^ (h >> 13)) >>> 0;
               h = (h * 1274126177) >>> 0;
 
               return (h >>> 0) / 4294967295;
           }
 
-          getCoordsByChunkIndex(chunk: { x: number, y: number }, tile: { x: number, y: number }, anchor: "topLeft" | "center" = "topLeft"): { x: number, y: number } {
-              let x = this.x + (chunk.x * this.chunkSize + tile.x) * this.cellSize;
-              let y = this.y + (chunk.y * this.chunkSize + tile.y) * this.cellSize;
+          getPointByChunkPosition(chunkPosition: ChunkPosition, blockPosition: BlockPosition, anchor: "topLeft" | "center" = "topLeft"): { x: number, y: number } {
+              let x = this.x + (chunkPosition.x * CHUNK_SIZE + blockPosition.x) * BLOCK_SIZE;
+              let y = this.y + (chunkPosition.y * CHUNK_SIZE + blockPosition.y) * BLOCK_SIZE;
 
               if (anchor == "center") {
                   x += this.cellOffset;
@@ -2701,8 +2725,8 @@ scripts:
               return { x, y };
           }
 
-          private rebuildLightOverlay(chunk: Chunk) {
-              const size = this.chunkSize;
+          rebuildLightOverlay(chunk: Chunk) {
+              const size = CHUNK_SIZE;
 
               if (chunk.lightOverlay) {
                   chunk.lightOverlay.destroy();
@@ -2714,46 +2738,47 @@ scripts:
 
               for (let y = 0; y < size; y++) {
                   for (let x = 0; x < size; x++) {
-
-                      const index = y * size + x;
+                      const blockPosition = { x, y };
+                      const index = chunk.getBlockIndexByBlockPosition(blockPosition);
                       const light = chunk.light[index] ?? 0;
 
-                      const darkness = 1 - (light / 15);
+                      const darknessRatio = 1 - (light / 15);
 
-                      if (darkness <= 0) continue;
+                      if (darknessRatio <= 0) continue;
 
-                      const { x: tileX, y: tileY } = this.getCoordsByChunkIndex(chunk, { x, y }, "center");
+                      const point = this.pointFromPosition(chunk.getWorldPosition(blockPosition), "center");
 
                       const tile = overlay.addTile(
                           "black",
-                          tileX,
-                          tileY,
+                          point.x,
+                          point.y,
                           0
                       );
 
-                      tile.alpha = darkness;
+                      tile.alpha = darknessRatio;
                   }
               }
 
               chunk.lightOverlay = overlay;
           }
 
-          private unloadChunk(cx: number, cy: number) {
-              const chunk = this.chunkManager.get(cx, cy);
+          private unloadChunk(chunkPosition: ChunkPosition) {
+              const chunk = this.chunkManager.get(chunkPosition);
               if (!chunk) return;
 
               const entities = [];
 
               for (const copy of this.entities) {
-                  
+
                   if (!copy.serialize) continue;
 
-                  const { worldX, worldY } = this.getWorldIndex(copy.x, copy.y);
+                  const worldPosition = this.positionFromPoint({ x: copy.x, y: copy.y });
+                  const entityChunkPosition = Chunk.positionFromWorldPosition(worldPosition);
 
-                  const ecx = Math.floor(worldX / this.chunkSize);
-                  const ecy = Math.floor(worldY / this.chunkSize);
-
-                  if (ecx === cx && ecy === cy) {
+                  if (
+                      entityChunkPosition.x === chunkPosition.x
+                      && entityChunkPosition.y === chunkPosition.y
+                  ) {
                       entities.push(copy.serialize());
                       copy.kill = true;
                   }
@@ -2761,26 +2786,94 @@ scripts:
 
               chunk.entities = entities;
 
-              this.destroyChunkPhysics(chunk);
-              this.destroyChunkBackground(chunk);
+              chunk.destroyPhysics(this);
+              chunk.destroyBackground();
           }
 
-          private buildChunk(cx: number, cy: number) {
-              let chunk = this.chunkManager.get(cx, cy);
+          rebuildGraphics(chunk: Chunk) {
+              const chunkPosition = chunk.getPosition();
+
+              if (chunk.tilemap) {
+                  chunk.tilemap.destroy();
+              }
+
+              const tilemap = tilemaps.create(-1);
+              rooms.current.addChild(tilemap);
+
+              for (let gx = 0; gx < CHUNK_SIZE; gx++) {
+                  for (let gy = 0; gy < CHUNK_SIZE; gy++) {
+
+                      const worldPosition = this.positionByChunkPosition(chunkPosition, { x: gx, y: gy });
+
+                      const ids = [
+                          this.getBlockId({ x: worldPosition.x - 1, y: worldPosition.y - 1 }),
+                          this.getBlockId({ x: worldPosition.x, y: worldPosition.y - 1 }),
+                          this.getBlockId({ x: worldPosition.x - 1, y: worldPosition.y }),
+                          this.getBlockId({ x: worldPosition.x, y: worldPosition.y })
+                      ];
+
+                      const blocks = ids
+                          .map(id => id !== 0 ? Block.get(id) : undefined)
+                          .filter(Boolean) as Block[];
+
+                      const uniqueLayers = [...new Set(blocks.map(t => t.renderLayer))];
+
+                      for (const layer of uniqueLayers) {
+
+                          const tl = (Block.get(ids[0])?.renderLayer === layer) ? 1 : 0;
+                          const tr = (Block.get(ids[1])?.renderLayer === layer) ? 1 : 0;
+                          const bl = (Block.get(ids[2])?.renderLayer === layer) ? 1 : 0;
+                          const br = (Block.get(ids[3])?.renderLayer === layer) ? 1 : 0;
+
+                          const mask = (tl << 3) | (tr << 2) | (bl << 1) | br;
+                          if (mask === 0) continue;
+
+                          const { frame, angle } =
+                              this.resolveCornerFrame(mask, worldPosition);
+
+                          const px = this.x + worldPosition.x * BLOCK_SIZE;
+                          const py = this.y + worldPosition.y * BLOCK_SIZE;
+
+                          const representative =
+                              blocks.find(t => t.renderLayer === layer);
+                          if (!representative) continue;
+
+                          const sprite = tilemap.addTile(
+                              representative.texture,
+                              px,
+                              py,
+                              frame
+                          );
+
+                          sprite.angle = angle;
+                          sprite.tint = representative.tint;
+                      }
+                  }
+              }
+
+              this.buildChunkBackground(chunk);
+
+              chunk.tilemap = tilemap;
+              chunk.dirtyLighting = true;
+          }
+
+          private buildChunk(chunkPosition: ChunkPosition): Chunk {
+              let chunk = this.chunkManager.get(chunkPosition);
 
               if (!chunk) {
-                  chunk = this.generateChunk(cx, cy);
+                  chunk = this.generateChunk(chunkPosition);
                   this.chunkManager.set(chunk);
 
                   this.rebuildGraphics(chunk);
-                  this.buildChunkPhysics(chunk);
+                  chunk.buildPhysics(this);
                   this.rebuildLightOverlay(chunk);
-                  return;
+
+                  return chunk;
               }
 
-              this.markGeometryDirty(chunk);
-              this.markPhysicsDirty(chunk);
-              this.markDamageDirty(chunk);
+              chunk.markGeometryDirty();
+              chunk.markPhysicsDirty();
+              chunk.markDamageDirty();
               chunk.dirtyLighting = true;
               this.dirtyLight = true;
 
@@ -2790,15 +2883,13 @@ scripts:
                       entityType.deserialize(entity);
                   }
               }
+
+              return chunk;
           }
 
-          private getRatioCenter(
-              biome: Biome,
-              worldX: number,
-              worldY: number
-          ): number {
+          private getRatioCenter(biome: Biome, worldPosition: WorldPosition): number {
 
-              const raw = this.getWarpedNoise(worldX, worldY);
+              const raw = this.getWarpedNoise(worldPosition);
               const threshold = biome.fillPercent;
 
               if (raw >= threshold) return 0;
@@ -2808,18 +2899,17 @@ scripts:
 
           private selectBiomeBlock(
               biome: Biome,
-              worldX: number,
-              worldY: number
+              worldPosition: WorldPosition
           ): number {
-              const ratioCenter = this.getRatioCenter(biome, worldX, worldY);
-              const detail = this.detailNoiseMap.get(worldX, worldY);
-              const { bottom, top } = this.getBiomeVerticalBounds(biome.layer, worldX);
+              const ratioCenter = this.getRatioCenter(biome, worldPosition);
+              const detail = this.detailNoiseMap.get(worldPosition.x, worldPosition.y);
+              const { bottom, top } = this.getBiomeVerticalBounds(biome.layer, worldPosition.x);
 
               const biomeHeight = Math.abs(bottom - top);
 
               const ratioHeight =
                   biomeHeight != 0
-                      ? 1 - (worldY - top) / biomeHeight
+                      ? 1 - (worldPosition.y - top) / biomeHeight
                       : 0;
 
               for (const rule of biome.rules) {
@@ -2827,8 +2917,8 @@ scripts:
                   if (rule.maxRatioCenter !== undefined && ratioCenter > rule.maxRatioCenter) continue;
                   if (rule.minDetail !== undefined && detail < rule.minDetail) continue;
                   if (rule.maxDetail !== undefined && detail > rule.maxDetail) continue;
-                  if (rule.minRawHeight !== undefined && worldY < rule.minRawHeight) continue;
-                  if (rule.maxRawHeight !== undefined && worldY > rule.maxRawHeight) continue;
+                  if (rule.minRawHeight !== undefined && worldPosition.y < rule.minRawHeight) continue;
+                  if (rule.maxRawHeight !== undefined && worldPosition.y > rule.maxRawHeight) continue;
                   if (rule.minRatioHeight !== undefined && ratioHeight < rule.minRatioHeight) continue;
                   if (rule.maxRatioHeight !== undefined && ratioHeight > rule.maxRatioHeight) continue;
 
@@ -2851,132 +2941,117 @@ scripts:
               return { top, bottom };
           }
 
-          getCoordByIndex(worldX: number, worldY: number, anchor: "topLeft" | "center" = "topLeft"): { x: number, y: number } {
-              let x = worldX * this.cellSize;
-              let y = worldY * this.cellSize;
-
-              if (anchor == "center") {
-                  x += this.cellOffset;
-                  y += this.cellOffset;
-              }
-
-              return { x, y };
+          positionFromPoint(point: Point): WorldPosition {
+              return {
+                  x: Math.floor((point.x - this.x) / BLOCK_SIZE),
+                  y: Math.floor((point.y - this.y) / BLOCK_SIZE)
+              };
           }
 
-          getWorldIndex(x: number, y: number): { worldX: number, worldY: number } {
-              const worldX = Math.floor((x - this.x) / this.cellSize);
-              const worldY = Math.floor((y - this.y) / this.cellSize);
+          changeBlock(point: Point, newTileIndex: number = 0) {
+              const worldPosition = this.positionFromPoint(point);
 
-              return { worldX, worldY };
+              this.changeBlockByWorldPosition(worldPosition, newTileIndex);
           }
 
-          changeBlock(x: number, y: number, newTileIndex: number = 0) {
-              const { worldX, worldY } = this.getWorldIndex(x, y);
+          changeBlockByWorldPosition(worldPosition: WorldPosition, newTileIndex: number = 0) {
+              const chunkPosition = Chunk.positionFromWorldPosition(worldPosition);
 
-              this.changeBlockByIndex(worldX, worldY, newTileIndex);
-          }
-
-          changeBlockByIndex(worldX: number, worldY: number, newTileIndex: number = 0) {
-              const cx = Math.floor(worldX / this.chunkSize);
-              const cy = Math.floor(worldY / this.chunkSize);
-
-              let chunk = this.chunkManager.get(cx, cy);
+              let chunk = this.chunkManager.get(chunkPosition);
 
               if (!chunk) {
-                  this.buildChunk(cx, cy);
-                  chunk = this.chunkManager.get(cx, cy);
+                  chunk = this.buildChunk(chunkPosition);
               }
 
-              const localX = ((worldX % this.chunkSize) + this.chunkSize) % this.chunkSize;
-              const localY = ((worldY % this.chunkSize) + this.chunkSize) % this.chunkSize;
+              const blockPosition = chunk.getBlockPositionByWorldPosition(worldPosition);
 
-              const index = localY * this.chunkSize + localX;
+              if (!blockPosition) return;
 
-              if (chunk.blocks[index] === newTileIndex) return;
+              const blockIndex = chunk.getBlockIndexByBlockPosition(blockPosition);
 
-              chunk.blocks[index] = newTileIndex;
-              chunk.damage.delete(index);
+              if (chunk.blocks[blockIndex] === newTileIndex) return;
 
-              this.markGeometryDirty(chunk);
-              this.markPhysicsDirty(chunk);
+              chunk.blocks[blockIndex] = newTileIndex;
+              chunk.damage.delete(blockIndex);
 
-              this.invalidateChunksAroundTile(chunk.x, chunk.y, localX, localY)
+              chunk.markGeometryDirty();
+              chunk.markPhysicsDirty();
+
+              this.invalidateChunksAroundBlock(chunkPosition, blockPosition);
 
               this.dirtyLight = true;
           }
 
-          damageBlock(x: number, y: number, amount: number) {
-              const { worldX, worldY } = this.getWorldIndex(x, y);
+          damageBlock(point: Point, amount: number) {
+              const worldPosition = this.positionFromPoint(point);
 
-              this.damageBlockByIndex(worldX, worldY, amount);
+              this.damageBlockByPosition(worldPosition, amount);
           }
 
-          damageBlockByIndex(worldX: number, worldY: number, amount: number) {
-              const cx = Math.floor(worldX / this.chunkSize);
-              const cy = Math.floor(worldY / this.chunkSize);
+          damageBlockByPosition(worldPosition: WorldPosition, amount: number) {
+              const chunkPosition = Chunk.positionFromWorldPosition(worldPosition);
+              console.log(worldPosition)
 
-              let chunk = this.chunkManager.get(cx, cy);
+              let chunk = this.chunkManager.get(chunkPosition);
+
               if (!chunk) {
-                  this.buildChunk(cx, cy);
-                  chunk = this.chunkManager.get(cx, cy);
+                  chunk = this.buildChunk(chunkPosition);
               }
 
-              const localX = ((worldX % this.chunkSize) + this.chunkSize) % this.chunkSize;
-              const localY = ((worldY % this.chunkSize) + this.chunkSize) % this.chunkSize;
+              const blockPosition = chunk.getBlockPositionByWorldPosition(worldPosition);
+              const blockIndex = chunk.getBlockIndexByBlockPosition(blockPosition);
 
-              const index = localY * this.chunkSize + localX;
-
-              const blockId = chunk.blocks[index];
+              const blockId = chunk.blocks[blockIndex];
               if (!blockId) return;
 
               const block = Block.get(blockId);
               if (!block) return;
 
-              const currentDamage = chunk.damage.get(index) ?? 0;
+              const currentDamage = chunk.damage.get(blockIndex) ?? 0;
               const newDamage = currentDamage + amount;
 
               if (newDamage >= block.maxHp) {
-                  block.onDestroyed(worldX, worldY);
-                  this.changeBlockByIndex(worldX, worldY, 0);
+                  block.onDestroyed(worldPosition);
+                  this.changeBlockByWorldPosition(worldPosition, 0);
               }
 
-              chunk.damage.set(index, newDamage);
-              this.markDamageDirty(chunk);
+              chunk.damage.set(blockIndex, newDamage);
+              chunk.markDamageDirty();
               this.dirtyLight = true;
           }
 
-          changeBackgroundBlock(x: number, y: number, newTileIndex: number = 0) {
-              const { worldX, worldY } = this.getWorldIndex(x, y);
-              this.changeBackgroundBlockByIndex(worldX, worldY, newTileIndex);
+          changeBackgroundBlock(point: Point, newTileIndex: number = 0) {
+              const worldPosition = this.positionFromPoint(point);
+              this.changeBackgroundBlockByIndex(worldPosition, newTileIndex);
           }
 
-          changeBackgroundBlockByIndex(worldX: number, worldY: number, newTileIndex: number = 0) {
-              const cx = Math.floor(worldX / this.chunkSize);
-              const cy = Math.floor(worldY / this.chunkSize);
+          changeBackgroundBlockByIndex(worldPosition: WorldPosition, newTileIndex: number = 0) {
+              const chunkPosition = Chunk.positionFromWorldPosition(worldPosition);
 
-              let chunk = this.chunkManager.get(cx, cy);
+              let chunk = this.chunkManager.get(chunkPosition);
 
               if (!chunk) {
-                  this.buildChunk(cx, cy);
-                  chunk = this.chunkManager.get(cx, cy);
+                  chunk = this.buildChunk(chunkPosition);
               }
 
-              const localX = ((worldX % this.chunkSize) + this.chunkSize) % this.chunkSize;
-              const localY = ((worldY % this.chunkSize) + this.chunkSize) % this.chunkSize;
+              const blockPosition = chunk.getBlockPositionByWorldPosition(worldPosition);
+              const blockIndex = chunk.getBlockIndexByBlockPosition(blockPosition);
 
-              const index = localY * this.chunkSize + localX;
+              if (chunk.backgroundBlocks[blockIndex] === newTileIndex) return;
 
-              if (chunk.backgroundBlocks[index] === newTileIndex) return;
+              chunk.backgroundBlocks[blockIndex] = newTileIndex;
+              chunk.backgroundDamage.delete(blockIndex);
 
-              chunk.backgroundBlocks[index] = newTileIndex;
-              chunk.backgroundDamage.delete(index);
-
-              this.markGeometryDirty(chunk);
+              chunk.markGeometryDirty();
               for (let dx = -1; dx <= 1; dx++) {
                   for (let dy = -1; dy <= 1; dy++) {
-                      const neighbor = this.chunkManager.get(cx + dx, cy + dy);
+                      const neighbor = this.chunkManager.get({
+                          x: chunkPosition.x + dx,
+                          y: chunkPosition.y + dy
+                      });
+
                       if (neighbor) {
-                          this.markGeometryDirty(neighbor);
+                          neighbor.markGeometryDirty();
                       }
                   }
               }
@@ -2984,42 +3059,36 @@ scripts:
               this.dirtyLight = true;
           }
 
-          damageBackgroundBlock(x: number, y: number, newTileIndex: number = 0) {
-              const { worldX, worldY } = this.getWorldIndex(x, y);
-              this.damageBackgroundBlockByIndex(worldX, worldY, newTileIndex);
+          damageBackgroundBlock(point: Point, newTileIndex: number = 0) {
+              const worldPosition = this.positionFromPoint(point);
+              this.damageBackgroundBlockByIndex(worldPosition, newTileIndex);
           }
 
-          damageBackgroundBlockByIndex(worldX: number, worldY: number, amount: number) {
-              const cx = Math.floor(worldX / this.chunkSize);
-              const cy = Math.floor(worldY / this.chunkSize);
+          damageBackgroundBlockByIndex(worldPosition: WorldPosition, amount: number) {
+              const chunkPosition = Chunk.positionFromWorldPosition(worldPosition);
 
-              let chunk = this.chunkManager.get(cx, cy);
+              let chunk = this.chunkManager.get(chunkPosition);
+
               if (!chunk) {
-                  this.buildChunk(cx, cy);
-                  chunk = this.chunkManager.get(cx, cy);
+                  chunk = this.buildChunk(chunkPosition);
               }
 
-              const localX = ((worldX % this.chunkSize) + this.chunkSize) % this.chunkSize;
-              const localY = ((worldY % this.chunkSize) + this.chunkSize) % this.chunkSize;
+              const blockPosition = chunk.getBlockPositionByWorldPosition(worldPosition);
+              const blockIndex = chunk.getBlockIndexByBlockPosition(blockPosition);
 
-              const index = localY * this.chunkSize + localX;
+              const block = Block.get(chunk.backgroundBlocks[blockIndex]);
+              if (!block) return;
 
-              const tileId = chunk.backgroundBlocks[index];
-              if (!tileId) return;
-
-              const tile = Block.get(tileId);
-              if (!tile) return;
-
-              const currentDamage = chunk.backgroundDamage.get(index) ?? 0;
+              const currentDamage = chunk.backgroundDamage.get(blockIndex) ?? 0;
               const newDamage = currentDamage + amount;
 
-              if (newDamage >= tile.maxHp) {
-                  this.changeBackgroundBlockByIndex(worldX, worldY, 0);
+              if (newDamage >= block.maxHp) {
+                  this.changeBackgroundBlockByIndex(worldPosition, 0);
               } else {
-                  chunk.backgroundDamage.set(index, newDamage);
+                  chunk.backgroundDamage.set(blockIndex, newDamage);
               }
 
-              this.markDamageDirty(chunk);
+              chunk.markDamageDirty();
               this.dirtyLight = true;
           }
       }
@@ -4517,7 +4586,7 @@ assets:
           matterGravity:
             - 0
             - 0
-        lastmod: 1772678646175
+        lastmod: 1773457604380
         events:
           - eventKey: OnRoomStart
             code: >-
@@ -4537,7 +4606,8 @@ assets:
               world.getBiomeVerticalBounds(BiomeLayer.Surface, 0);
 
 
-              const { x, y } = world.getCoordByIndex(0, surfaceBounds.top - 1)
+              const { x, y } = world.pointFromPosition({x: 0, y:
+              surfaceBounds.top - 1})
 
 
               this.player = templates.copy('player', x, y);
@@ -5165,11 +5235,6 @@ assets:
               camera.follow = this;
 
 
-              this.worldX = 0;
-
-              this.worldY = 0;
-
-
               this.isBuildMode = false;
 
 
@@ -5276,14 +5341,11 @@ assets:
                       y: start.y + 2
                   };
 
-                  this.bodiesNear = world.getBodiesNear(this.x / world.cellSize, this.y / world.cellSize);
+                  this.worldPosition = world.positionFromPoint(this);
+
+                  this.bodiesNear = world.getBodiesNear(this.worldPosition);
 
                   const hits = Matter.Query.ray(this.bodiesNear, start, end, 12);
-
-                  const { worldX, worldY } = world.getWorldIndex(this.x, this.y)
-                  
-                  this.worldX = worldX;
-                  this.worldY = worldY;
 
                   this.isGrounded = hits.length > 0;
               };
@@ -5301,9 +5363,9 @@ assets:
 
               // Debug.set("Player Animation Speed", () => this.animationSpeed);
 
-              Debug.set("Player World X", () => this.worldX);
+              Debug.set("Player World X", () => this.worldPosition.x);
 
-              Debug.set("Player World Y", () => this.worldY);
+              Debug.set("Player World Y", () => this.worldPosition.y);
 
               Debug.set("Player Velocity X", () =>
               this.matterBody.velocity.x.toFixed(2));
@@ -5354,7 +5416,7 @@ assets:
           lightOpacity: false
           lightScale: 0
           cursorpointer: false
-        lastmod: 1772769089029
+        lastmod: 1773454341490
         uid: HbdjfWPTmMR79j
         behaviors:
           - pd8grnPh27DHL7
@@ -5373,6 +5435,7 @@ assets:
           inventoryRenderer: BasicCopy;
           hotbarSelectedIndex: number;
           hand: Item;
+          worldPosition: WorldPosition;
           inventoryHotbar: Inventory;
           hotbarRenderer: BasicCopy;
         blendMode: normal
@@ -5483,13 +5546,9 @@ assets:
             behaviorType: template
             events:
               - eventKey: OnCreate
-                code: >-
-                  const { worldX, worldY } = world.getWorldIndex(this.x,
-                  this.y);
-
-
-                  this.currentBiome = world.getBiome(worldX, worldY);
-
+                code: |-
+                  this.worldPosition = world.positionFromPoint(this);
+                  this.currentBiome = world.getBiome(this.worldPosition);
                   this.localGravity = this.currentBiome.localGravity;
                 arguments: {}
                 lib: core
@@ -5500,6 +5559,9 @@ assets:
                       x: 0,
                       y: this.localGravity
                   });
+
+
+                  this.worldPosition = world.positionFromPoint(this);
                 arguments: {}
                 lib: core
             specification: []
@@ -5507,7 +5569,7 @@ assets:
               currentBiome: Biome;
               localGravity: number;
               matterBody: Matter.Body;
-            lastmod: 1772294372977
+            lastmod: 1773454341514
             uid: pd8grnPh27DHL7
           - type: behavior
             name: entity
@@ -6183,9 +6245,9 @@ assets:
           }
 
           if (isDebugMode && actions.Primary.pressed) {
-              const { worldX, worldY } = world.getWorldIndex(pointer.x, pointer.y);
+              const worldPosition = world.positionFromPoint(pointer);
 
-              world.addLightSource(worldX, worldY, 15);
+              world.addLightSource(worldPosition, 15);
           }
 
           world.updateChunkVisibility(camera.getBounds());
@@ -6193,7 +6255,7 @@ assets:
         language: typescript
         variables: []
         runAutomatically: false
-        lastmod: 1772776318240
+        lastmod: 1773457500071
         type: script
       - uid: cmGtf6w9P2pNDN
         name: CameraSetup
