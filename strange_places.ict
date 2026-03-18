@@ -794,25 +794,26 @@ scripts:
           scaleY: number;
       }
 
+      type PhysicsBodyData = EntityData & {
+          restitution: number;
+          mass: number;
+          intertia: number;
+          collisionCategory: CollisionCategory;
+          collisionMask: CollisionCategory;
+          velocity: { x: number, y: number };
+      }
+
       type EntityConstructor<T extends Entity<any> = Entity<any>> =
           new (...args: any[]) => T;
 
-      type EntityClass = {
-          new(...args: any[]): Entity<any>;
+      type EntityClass<T extends Entity<any>> = {
+          new(...args: any[]): T;
           template: EntityTemplate;
       };
 
       abstract class Entity<T extends EntityData> implements Serializable<T> {
-
           static registry = new Map<EntityTemplate, EntityConstructor>();
-
           static template: EntityTemplate;
-
-          protected static ensureRegistered(this: EntityConstructor & typeof Entity) {
-              if (!Entity.registry.has(this.template)) {
-                  Entity.registry.set(this.template, this);
-              }
-          }
 
           static get(template: EntityTemplate) {
               return this.registry.get(template);
@@ -820,8 +821,8 @@ scripts:
 
           protected copy: BasicCopy;
 
-          constructor(point: Point, firstCreate: boolean = true) {
-              const ctor = this.constructor as EntityClass;
+          constructor(point: Point) {
+              const ctor = this.constructor as EntityClass<any>;
 
               if (!Entity.registry.has(ctor.template)) {
                   Entity.registry.set(ctor.template, ctor);
@@ -831,7 +832,7 @@ scripts:
                   ctor.template,
                   point.x,
                   point.y,
-                  { entity: this, firstCreate: firstCreate }
+                  { entity: this }
               );
           }
 
@@ -848,11 +849,21 @@ scripts:
               } as T;
           }
 
+          initialize(firstCreate: boolean) {
+              this.onCreate();
+
+              if (firstCreate) {
+                  this.onFirstCreate();
+              }
+          }
+
           loadData(data: T): void {
               this.copy.x = data.x;
               this.copy.y = data.y;
               this.copy.angle = data.angle;
               this.copy.scale.set(data.scaleX, data.scaleY);
+
+              this.initialize(false);
           }
 
           destroy() {
@@ -867,10 +878,104 @@ scripts:
           onFrameStart() { }
           onFrameEnd() { }
           onCreate() { }
+          onFirstCreate() { }
           onDestroy() { }
+      }
+
+      class PhysicsEntity<T extends PhysicsBodyData> extends Entity<T> {
+          declare protected copy: BasicCopy & { matterBody: Matter.Body };
+
+          protected restitution: number;
+          protected mass: number;
+          protected intertia: number;
+          protected collisionCategory: CollisionCategory;
+          protected collisionMask: CollisionCategory;
+
+          constructor(point: Point) {
+              super(point);
+
+              if (!this.copy.matterBody) {
+                  throw new Error("Copy does not have physics active");
+              }
+          }
+
+          onCreate() {
+              this.copy.matterBody.restitution = this.restitution;
+              Matter.Body.setMass(this.copy.matterBody, this.mass);
+              Matter.Body.setInertia(this.copy.matterBody, this.intertia);
+
+              this.copy.matterBody.collisionFilter = {
+                  category: this.collisionCategory,
+                  mask: this.collisionMask
+              }
+          }
+
+          serialize(): T {
+              const base = super.serialize();
+
+              if (!this.copy.matterBody) {
+                  throw new Error("Copy does not have physics active");
+              }
+
+              const matterBody = this.copy.matterBody
+
+              return {
+                  ...base,
+                  restitution: matterBody.restitution,
+                  mass: matterBody.mass,
+                  intertia: matterBody.inertia,
+                  collisionCategory: matterBody.collisionFilter.category,
+                  collisionMask: matterBody.collisionFilter.mask,
+                  velocity: matterBody.velocity
+              };
+          }
+
+          loadData(data: T) {
+              super.loadData(data);
+
+              Matter.Body.setVelocity(this.copy.matterBody, data.velocity);
+          }
       }
   - name: item
     code: |-
+      type StackData = {
+          count: number;
+          itemId: number;
+      }
+
+      class Stack implements Serializable<StackData> {
+          count: number;
+          itemId: number;
+
+          constructor(count: number = 0, itemId: number = 0) {
+              this.count = count;
+              this.itemId = itemId;
+          }
+
+          serialize(): StackData {
+              return {
+                  count: this.count,
+                  itemId: this.itemId
+              };
+          }
+
+          loadData(data: StackData) {
+              this.count = data.count;
+              this.itemId = data.itemId;
+          }
+
+          isEmpty(): boolean {
+              return this.count == 0
+                  || this.itemId == 0
+                  || !Item.has(this.itemId);
+          }
+
+          setEmpty() {
+              this.count = 0;
+              this.itemId = 0;
+          }
+      }
+
       type ItemOptions = {
           name: string;
           readableName: string;
@@ -992,7 +1097,9 @@ scripts:
               const point = world.pointFromPosition(worldPosition, "center");
 
               for (const stack of this.lootTable.next()) {
-                  StackEntity.create(point, stack);
+                  const stackEntity = new StackEntity(point);
+                  stackEntity.stack = stack;
+                  stackEntity.initialize(true);
               }
           }
       }
@@ -1129,27 +1236,6 @@ scripts:
 
               this.width = this.left + this.right;
               this.height = this.bottom + this.top;
-          }
-      }
-
-      class Stack {
-          count: number;
-          itemId: number;
-
-          constructor(count: number = 0, itemId: number = 0) {
-              this.count = count;
-              this.itemId = itemId;
-          }
-
-          isEmpty(): boolean {
-              return this.count == 0
-                  || this.itemId == 0
-                  || !Item.has(this.itemId);
-          }
-
-          setEmpty() {
-              this.count = 0;
-              this.itemId = 0;
           }
       }
 
@@ -1663,14 +1749,35 @@ scripts:
       }
   - name: items
     code: |
-      class PistolItem extends Item {
+      type PistolData = {
+          isBuildMode: boolean,
+          damagePerSecond: number;    
+          blockId: number;
+      }
+
+      class PistolItem extends Item implements Serializable<PistolData> {
           damagePerSecond: number = 1000;
           isBuildMode: boolean = false;
+          blockId: number = DIRT.id;
+
+          serialize(): PistolData {
+              return {
+                  damagePerSecond: this.damagePerSecond,
+                  isBuildMode: this.isBuildMode,
+                  blockId: this.blockId
+              }
+          }
+
+          loadData(data: PistolData) {
+              this.damagePerSecond = data.damagePerSecond;
+              this.isBuildMode = data.isBuildMode;
+              this.blockId = data.blockId;
+          }
 
           update() {
               if (actions.Primary.down) {
                   if (this.isBuildMode) {
-                      world.changeBlock(pointer, DIRT.id);
+                      world.changeBlock(pointer, this.blockId);
                   } else {
                       world.damageBlock(pointer, this.damagePerSecond * u.time);
                   }
@@ -1678,7 +1785,7 @@ scripts:
 
               if (actions.Secondary.down) {
                   if (this.isBuildMode) {
-                      world.changeBackgroundBlock(pointer, DIRT.id);
+                      world.changeBackgroundBlock(pointer, this.blockId);
                   } else {
                       world.damageBackgroundBlock(pointer, this.damagePerSecond * u.time);
                   }
@@ -2033,57 +2140,89 @@ scripts:
       //     .addRule(SNOW);
   - name: entities
     code: |-
-      type StackData = EntityData & {
-          itemId: number;
-          count: number;
+      type StackEntityData = PhysicsBodyData & {
+          stack: StackData
       }
 
-      class StackEntity extends Entity<StackData> {
+      class StackEntity extends PhysicsEntity<StackEntityData> {
           static template = EntityTemplate.ItemStack;
 
-          stack: Stack;
+          restitution: number = 0;
+          mass: number = 1;
+          intertia: number = Infinity;
+          collisionCategory: CollisionCategory = CollisionCategory.Entity;
+          collisionMask: CollisionCategory = CollisionCategory.Block;
 
-          static create(point: Point, stack: Stack): StackEntity {
-              const stackEntity = new StackEntity(point, true);
+          stack!: Stack;
 
-              stackEntity.stack = stack;
+          onCreate() {
+              super.onCreate();
 
-              const item = Item.get(stackEntity.stack.itemId);
+              const item = Item.get(this.stack.itemId);
 
-              if (!!item) {
-                  stackEntity.copy.tex = item.texture;
-                  stackEntity.copy.currentFrame = item.frame;
+              if (item) {
+                  this.copy.tex = item.texture;
+                  this.copy.currentFrame = item.frame;
               }
-
-              Matter.Body.setVelocity(
-                  stackEntity.copy.matterBody,
-                  { x: 0.1 - 0.2 * random.range(0, 1), y: 0 }
-              );
-
-              return stackEntity;
           }
 
-          serialize(): StackData {
+          onFirstCreate() {
+              Matter.Body.setVelocity(
+                  this.copy.matterBody,
+                  { x: 0.1 - 0.2 * random.range(0, 1), y: 0 }
+              );
+          }
+
+          serialize(): StackEntityData {
               const base = super.serialize();
 
               return {
                   ...base,
-                  itemId: this.stack.itemId,
-                  count: this.stack.count
+                  stack: this.stack.serialize()
               };
           }
 
-          loadData(data: StackData) {
-              this.stack = new Stack(data.count, data.itemId);
+          loadData(data: StackEntityData) {
+              const stack = new Stack()
+              stack.loadData(data.stack);
+
+              this.stack = stack;
 
               super.loadData(data);
+          }
+      }
+
+      type PlayerData = PhysicsBodyData & {
+
+      }
+
+      class PlayerEntity extends PhysicsEntity<PlayerData> {
+          static template = EntityTemplate.ItemStack;
+
+          restitution: number = 0;
+          mass: number = 5;
+          intertia: number = Infinity;
+          collisionCategory: CollisionCategory = CollisionCategory.Player;
+          collisionMask: CollisionCategory = CollisionCategory.Block;
+
+          stack!: Stack;
+
+          onCreate() {
+              super.onCreate();
 
               const item = Item.get(this.stack.itemId);
 
-              if (!!item) {
+              if (item) {
                   this.copy.tex = item.texture;
                   this.copy.currentFrame = item.frame;
               }
+          }
+
+          onFirstCreate() {
+              Matter.Body.setVelocity(
+                  this.copy.matterBody,
+                  { x: 0.1 - 0.2 * random.range(0, 1), y: 0 }
+              );
           }
       }
   - name: debug
@@ -2434,7 +2573,7 @@ scripts:
               }
 
               const overlay = tilemaps.create(-1);
-              overlay.zIndex = 9999;;
+              overlay.zIndex = 9999;
 
               for (const [index, damage] of chunk.damage) {
                   const block = Block.get(chunk.blocks[index]);
@@ -3008,7 +3147,7 @@ scripts:
                   }
               }
 
-              chunk.serializedEntities = entities;
+              chunk.serializedEntityData = entities;
 
               chunk.destroyPhysics(this);
               chunk.destroyBackground();
@@ -3101,10 +3240,10 @@ scripts:
               chunk.dirtyLighting = true;
               this.dirtyLight = true;
 
-              if (chunk.serializedEntities) {
-                  for (const data of chunk.serializedEntities) {
+              if (chunk.serializedEntityData) {
+                  for (const data of chunk.serializedEntityData) {
                       const entityType = Entity.get(data.template);
-                      const entity = new entityType(data.x, data.y);
+                      const entity = new entityType({ x: data.x, y: data.y });
 
                       logger.debug(LogGroups.SYSTEM, `loading ${entity.getCopy().template}`);
                       entity.loadData(data);
@@ -5412,11 +5551,11 @@ assets:
               if(!!this.hand) {
                   this.hand.update();
               }
-              InventoryUi.renderMouseStack();
 
               if (actions.Extra.down && actions.Primary.pressed) {
                   this.inventoryHotbar.addStack(PISTOL.id, 1);
               }
+
               if (actions.Extra.down && actions.Secondary.pressed) {
                   this.inventoryHotbar.addStack(DINAMITE.id, 50);
               }
@@ -5601,12 +5740,6 @@ assets:
 
               // Debug.set("Player Grounded", () => this.isGrounded);
 
-              // Debug.set("Player Animated", () => this.playing);
-
-              // Debug.set("Player Current Frame", () => this.currentFrame);
-
-              // Debug.set("Player Animation Speed", () => this.animationSpeed);
-
               Debug.set("Player World X", () => this.worldPosition.x);
 
               Debug.set("Player World Y", () => this.worldPosition.y);
@@ -5660,7 +5793,7 @@ assets:
           lightOpacity: false
           lightScale: 0
           cursorpointer: false
-        lastmod: 1773771321500
+        lastmod: 1773789299112
         uid: HbdjfWPTmMR79j
         behaviors:
           - pd8grnPh27DHL7
@@ -5820,12 +5953,7 @@ assets:
             behaviorType: template
             events:
               - eventKey: OnCreate
-                code: |-
-                  world.copies.add(this);
-
-                  if (this.firstCreate) {
-                      this.entity.onCreate();
-                  }
+                code: world.copies.add(this);
                 arguments: {}
                 lib: core
               - eventKey: OnDestroy
@@ -5847,7 +5975,7 @@ assets:
                 lib: core
             specification: []
             extendTypes: 'entity: Entity;'
-            lastmod: 1773771321528
+            lastmod: 1773794391567
             uid: 43WdcbDq6wKCpn
       - type: template
         baseClass: AnimatedSprite
@@ -5924,19 +6052,7 @@ assets:
         loopAnimation: true
         animationFPS: 30
         visible: true
-        events:
-          - eventKey: OnCreate
-            code: |-
-              this.matterBody.restitution = 0;
-              Matter.Body.setMass(this.matterBody, 1);
-              Matter.Body.setInertia(this.matterBody, Infinity);
-
-              this.matterBody.collisionFilter = {
-                  category: CollisionCategory.Entity,
-                  mask: CollisionCategory.Block
-              }
-            arguments: {}
-            lib: core
+        events: []
         extends:
           cgroup: ''
           matterEnable: true
@@ -5950,11 +6066,11 @@ assets:
           matterFixPivot:
             - 0
             - 0
-        lastmod: 1773779363782
+        lastmod: 1773790687881
         uid: dhGWLDBbjjf2jM
         behaviors:
-          - pd8grnPh27DHL7
           - 43WdcbDq6wKCpn
+          - pd8grnPh27DHL7
         extendTypes: 'stack: Stack;'
   - type: folder
     uid: p9DchCCMDrmQkb
@@ -6471,10 +6587,12 @@ assets:
           if (actions.DebugToggle.pressed) {
               isDebugMode = !isDebugMode;
           }
+
+          InventoryUi.renderMouseStack();
         language: typescript
         variables: []
         runAutomatically: false
-        lastmod: 1773768352407
+        lastmod: 1773789188880
         type: script
       - uid: cmGtf6w9P2pNDN
         name: CameraSetup
