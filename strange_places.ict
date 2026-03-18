@@ -175,7 +175,7 @@ scripts:
           return Math.exp(-Math.pow(difference, 2) * heightSharpness) * weight;
       }
   - name: configs
-    code: |+
+    code: |-
       const SKY_TOP = -100;
       const SURFACE_TOP = 0;
       const UNDERGROUND_TOP = 30;
@@ -193,7 +193,11 @@ scripts:
       const UI_STYLE_SHEET_NAME = "ui";
 
       PIXI.settings.ROUND_PIXELS = true;
+      PIXI.settings.SCALE_MODE = PIXI.SCALE_MODES.NEAREST;
 
+      function getMaxCameraScale(): number {
+          return isDebugMode ? 4 : 1;
+      }
   - name: enums
     code: |-
       enum BiomeLayer {
@@ -219,9 +223,9 @@ scripts:
       }
 
       function getUiTexture(index: number, uiType: UiType): Texture  {
-          const frame = index * styleSheetColumns + uiType;
+          const frame = index * UI_STYLE_SHEET_COLUMNS + uiType;
           
-          return res.getTexture(styleSheetName, frame);
+          return res.getTexture(UI_STYLE_SHEET_NAME, frame);
       }
   - name: interfaces
     code: |-
@@ -272,14 +276,210 @@ scripts:
           x: number;
           y: number;
       }
+
+      /**
+       * Represents an object whose state can be converted to and restored from
+       * a serializable data structure.
+       *
+       * Implementations should return a plain data object from {@link serialize}
+       * that contains all information necessary to fully reconstruct the object's
+       * state. This data should be safe to store (e.g., JSON) and should not include
+       * runtime references or engine-specific objects.
+       *
+       * The {@link loadData} method restores the object's state from previously
+       * serialized data.
+       *
+       * This interface is typically used for saving and loading game state.
+       *
+       * @template T The shape of the serialized data.
+       */
+      interface Serializable<TData> {
+          /**
+           * Converts the current state of the object into a serializable data object.
+           */
+          serialize(): TData;
+
+          /**
+           * Restores the object's state from serialized data.
+           *
+           * @param data The data previously produced by `serialize`.
+           */
+          loadData(data: TData): void;
+      }
+  - name: logGroups
+    code: |-
+      interface LogGroup {
+        key: string
+        color: string
+        enabled: boolean
+      }
+
+      const LogGroups = {
+        EVENTS: {
+          key: "EVENTS",
+          color: "#4CAF50",
+          enabled: true
+        },
+        SYSTEM: {
+          key: "SYSTEM",
+          color: "#FFFFFF",
+          enabled: true
+        }
+      } as const
+
+      type LogGroupType = (typeof LogGroups)[keyof typeof LogGroups]
+  - name: logger
+    code: |-
+      enum LogLevel {
+          DEBUG = 0,
+          INFO = 1,
+          WARN = 2,
+          ERROR = 3
+      }
+
+      class Logger {
+          enabled = true;
+          level: LogLevel = LogLevel.DEBUG;
+
+          private log(level: LogLevel, group: LogGroup, ...args: unknown[]) {
+              if (!this.enabled) return;
+              if (!group.enabled) return;
+              if (level < this.level) return;
+
+              const prefix = `[${LogLevel[level]}][${group.key}]`;
+              const style = `color:${group.color}; font-weight:bold`;
+
+              switch (level) {
+                  case LogLevel.DEBUG:
+                  case LogLevel.INFO:
+                      console.log(`%c${prefix}`, style, ...args);
+                      break;
+
+                  case LogLevel.WARN:
+                      console.warn(`%c${prefix}`, style, ...args);
+                      break;
+
+                  case LogLevel.ERROR:
+                      console.error(`%c${prefix}`, style, ...args);
+                      break;
+              }
+          }
+
+          debug(group: LogGroup, ...args: unknown[]) {
+              this.log(LogLevel.DEBUG, group, ...args);
+          }
+
+          info(group: LogGroup, ...args: unknown[]) {
+              this.log(LogLevel.INFO, group, ...args);
+          }
+
+          warn(group: LogGroup, ...args: unknown[]) {
+              this.log(LogLevel.WARN, group, ...args);
+          }
+
+          error(group: LogGroup, ...args: unknown[]) {
+              this.log(LogLevel.ERROR, group, ...args);
+          }
+
+          enable() {
+              this.enabled = true;
+          }
+
+          disable() {
+              this.enabled = false;
+          }
+
+          setLevel(level: LogLevel) {
+              this.level = level;
+          }
+
+          enableGroup(group: LogGroup) {
+              group.enabled = true;
+          }
+
+          disableGroup(group: LogGroup) {
+              group.enabled = false;
+          }
+      }
   - name: classes
+    code: |-
+      class LootTable {
+          result: Stack;
+
+          constructor(result: Stack) {
+              this.result = result;
+          }
+
+          next(): Stack[] {
+              return [this.result];
+          }
+      }
+
+      class NoiseMap {
+          offsetX: number;
+          offsetY: number;
+          scale: number;
+
+          octaves: number;
+          persistence: number;
+          lacunarity: number;
+          threshold: number | null;
+
+          constructor(
+              scale: number,
+              seedRandom: () => number,
+              octaves: number = 1,
+              persistence: number = 0.5,
+              lacunarity: number = 2,
+              threshold: number | null = null
+          ) {
+              this.scale = scale;
+              this.octaves = octaves;
+              this.persistence = persistence;
+              this.lacunarity = lacunarity;
+              this.threshold = threshold;
+
+              this.offsetX = seedRandom() * 100000;
+              this.offsetY = seedRandom() * 100000;
+          }
+
+          get(x: number, y: number): number {
+              let amplitude = 1;
+              let frequency = 1;
+              let total = 0;
+              let maxValue = 0;
+
+              for (let i = 0; i < this.octaves; i++) {
+
+                  const sampleX = (x + this.offsetX) / this.scale * frequency;
+                  const sampleY = (y + this.offsetY) / this.scale * frequency;
+
+                  const value = noise.perlin2d(sampleX, sampleY);
+
+                  total += value * amplitude;
+                  maxValue += amplitude;
+
+                  amplitude *= this.persistence;
+                  frequency *= this.lacunarity;
+              }
+
+              total /= maxValue;
+
+              if (this.threshold) {
+                  return (total + 1) / 2 > this.threshold ? 1 : 0;
+              }
+
+              return (total + 1) / 2;
+          }
+      }
+  - name: event
     code: |-
       type Listener<T> = (event: T) => void;
 
       class Event<T = void> {
         private listeners = new Set<Listener<T>>();
 
-        subscribe(listener: Listener<T>): () => void {
+        on(listener: Listener<T>): () => void {
           this.listeners.add(listener);
           return () => this.listeners.delete(listener);
         }
@@ -290,7 +490,8 @@ scripts:
           }
         }
       }
-
+  - name: chunk
+    code: |-
       type ChunkOptions = {
           x: number;
           y: number;
@@ -318,7 +519,7 @@ scripts:
 
           light: Uint8Array;
 
-          entities: EntityData[];
+          serializedEntities: EntityData[];
 
           dirtyGeometry?: boolean;
           dirtyLighting?: boolean;
@@ -338,7 +539,7 @@ scripts:
               this.blocks = blocks;
               this.backgroundBlocks = backgroundBlocks;
 
-              this.entities = [];
+              this.serializedEntities = [];
               this.tilemap = tilemaps.create(-1);
               this.damage = new Map();
               this.backgroundDamage = new Map();
@@ -554,20 +755,38 @@ scripts:
           }
       };
 
-      class LootTable {
-          result: Stack;
+      class ChunkManager {
+          chunks = new Map<string, Chunk>();
 
-          constructor(result: Stack) {
-              this.result = result;
+          getKey(chunkPosition: ChunkPosition) {
+              return `${chunkPosition.x},${chunkPosition.y}`;
           }
 
-          next(): Stack[] {
-              return [this.result];
+          getByKey(key: string) {
+              return this.chunks.get(key);
           }
+
+          get(chunkPosition: ChunkPosition) {
+              return this.chunks.get(this.getKey(chunkPosition));
+          }
+
+          set(chunk: Chunk) {
+              this.chunks.set(this.getKey(chunk.getPosition()), chunk);
+          }
+
+          delete(chunkPosition: ChunkPosition) {
+              this.chunks.delete(this.getKey(chunkPosition));
+          }
+      }
+  - name: entity
+    code: |-
+      enum EntityTemplate {
+          ItemStack = "item-stack",
+          Player = "player"
       }
 
       type EntityData = {
-          template: string;
+          template: EntityTemplate;
           x: number;
           y: number;
           angle: number;
@@ -575,36 +794,83 @@ scripts:
           scaleY: number;
       }
 
-      abstract class Entity<T extends EntityData> {
-          static registry = new Map<string, Entity<any>>();
+      type EntityConstructor<T extends Entity<any> = Entity<any>> =
+          new (...args: any[]) => T;
 
-          static register(template: string, entity: Entity<any>) {
-              this.registry.set(template, entity);
+      type EntityClass = {
+          new(...args: any[]): Entity<any>;
+          template: EntityTemplate;
+      };
+
+      abstract class Entity<T extends EntityData> implements Serializable<T> {
+
+          static registry = new Map<EntityTemplate, EntityConstructor>();
+
+          static template: EntityTemplate;
+
+          protected static ensureRegistered(this: EntityConstructor & typeof Entity) {
+              if (!Entity.registry.has(this.template)) {
+                  Entity.registry.set(this.template, this);
+              }
           }
 
-          static get(template: string) {
+          static get(template: EntityTemplate) {
               return this.registry.get(template);
           }
 
-          serialize(copy: BasicCopy): T {
+          protected copy: BasicCopy;
+
+          constructor(point: Point, firstCreate: boolean = true) {
+              const ctor = this.constructor as EntityClass;
+
+              if (!Entity.registry.has(ctor.template)) {
+                  Entity.registry.set(ctor.template, ctor);
+              }
+
+              this.copy = templates.copy(
+                  ctor.template,
+                  point.x,
+                  point.y,
+                  { entity: this, firstCreate: firstCreate }
+              );
+          }
+
+          serialize(): T {
+              this.copy.kill = true;
+
               return {
-                  x: copy.x,
-                  y: copy.y,
-                  angle: copy.angle,
-                  scaleX: copy.scale.x,
-                  scaleY: copy.scale.y,
-                  template: copy.template
+                  template: this.copy.template,
+                  x: this.copy.x,
+                  y: this.copy.y,
+                  angle: this.copy.angle,
+                  scaleX: this.copy.scale.x,
+                  scaleY: this.copy.scale.y
               } as T;
           }
 
-          deserialize(data: T, params: any = {}): void {
-              const copy = templates.copy(data.template, data.x, data.y, { reloading: true, ...params })
-
-              copy.angle = data.angle;
-              copy.scale.set(data.scaleX, data.scaleY);
+          loadData(data: T): void {
+              this.copy.x = data.x;
+              this.copy.y = data.y;
+              this.copy.angle = data.angle;
+              this.copy.scale.set(data.scaleX, data.scaleY);
           }
-      }
 
+          destroy() {
+              this.copy.isDestroying = true;
+              this.copy.kill = true;
+          }
+
+          getCopy(): BasicCopy {
+              return this.copy;
+          }
+
+          onFrameStart() { }
+          onFrameEnd() { }
+          onCreate() { }
+          onDestroy() { }
+      }
+  - name: item
+    code: |-
       type ItemOptions = {
           name: string;
           readableName: string;
@@ -655,7 +921,8 @@ scripts:
           onEnterHand() { }
           onLeaveHand() { }
       }
-
+  - name: block
+    code: |-
       type BlockOptions = {
           name: string;
           texture: string;
@@ -722,14 +989,15 @@ scripts:
                   return;
               }
 
-              const { x, y } = world.pointFromPosition(worldPosition, "center");
+              const point = world.pointFromPosition(worldPosition, "center");
 
               for (const stack of this.lootTable.next()) {
-                  templates.copy('item-stack', x, y, { stack: stack });
+                  StackEntity.create(point, stack);
               }
           }
       }
-
+  - name: biome
+    code: |-
       type BiomeOptions = {
           name: string;
           layer: BiomeLayer;
@@ -842,88 +1110,6 @@ scripts:
               this.humidityWeight = humidityWeight;
           }
       };
-
-      class ChunkManager {
-          chunks = new Map<string, Chunk>();
-
-          getKey(chunkPosition: ChunkPosition) {
-              return `${chunkPosition.x},${chunkPosition.y}`;
-          }
-
-          getByKey(key: string) {
-              return this.chunks.get(key);
-          }
-
-          get(chunkPosition: ChunkPosition) {
-              return this.chunks.get(this.getKey(chunkPosition));
-          }
-
-          set(chunk: Chunk) {
-              this.chunks.set(this.getKey(chunk.getPosition()), chunk);
-          }
-
-          delete(chunkPosition: ChunkPosition) {
-              this.chunks.delete(this.getKey(chunkPosition));
-          }
-      }
-
-      class NoiseMap {
-          offsetX: number;
-          offsetY: number;
-          scale: number;
-
-          octaves: number;
-          persistence: number;
-          lacunarity: number;
-          threshold: number | null;
-
-          constructor(
-              scale: number,
-              seedRandom: () => number,
-              octaves: number = 1,
-              persistence: number = 0.5,
-              lacunarity: number = 2,
-              threshold: number | null = null
-          ) {
-              this.scale = scale;
-              this.octaves = octaves;
-              this.persistence = persistence;
-              this.lacunarity = lacunarity;
-              this.threshold = threshold;
-
-              this.offsetX = seedRandom() * 100000;
-              this.offsetY = seedRandom() * 100000;
-          }
-
-          get(x: number, y: number): number {
-              let amplitude = 1;
-              let frequency = 1;
-              let total = 0;
-              let maxValue = 0;
-
-              for (let i = 0; i < this.octaves; i++) {
-
-                  const sampleX = (x + this.offsetX) / this.scale * frequency;
-                  const sampleY = (y + this.offsetY) / this.scale * frequency;
-
-                  const value = noise.perlin2d(sampleX, sampleY);
-
-                  total += value * amplitude;
-                  maxValue += amplitude;
-
-                  amplitude *= this.persistence;
-                  frequency *= this.lacunarity;
-              }
-
-              total /= maxValue;
-
-              if (this.threshold) {
-                  return (total + 1) / 2 > this.threshold ? 1 : 0;
-              }
-
-              return (total + 1) / 2;
-          }
-      }
   - name: ui
     code: |-
       class Padding {
@@ -1853,28 +2039,51 @@ scripts:
       }
 
       class StackEntity extends Entity<StackData> {
-          static {
-              Entity.register("item-stack", new StackEntity());
+          static template = EntityTemplate.ItemStack;
+
+          stack: Stack;
+
+          static create(point: Point, stack: Stack): StackEntity {
+              const stackEntity = new StackEntity(point, true);
+
+              stackEntity.stack = stack;
+
+              const item = Item.get(stackEntity.stack.itemId);
+
+              if (!!item) {
+                  stackEntity.copy.tex = item.texture;
+                  stackEntity.copy.currentFrame = item.frame;
+              }
+
+              Matter.Body.setVelocity(
+                  stackEntity.copy.matterBody,
+                  { x: 0.1 - 0.2 * random.range(0, 1), y: 0 }
+              );
+
+              return stackEntity;
           }
 
-          serialize(copy: BasicCopy): StackData {
-
-              const base = super.serialize(copy);
+          serialize(): StackData {
+              const base = super.serialize();
 
               return {
                   ...base,
-                  itemId: copy.stack.itemId,
-                  count: copy.stack.count
+                  itemId: this.stack.itemId,
+                  count: this.stack.count
               };
           }
 
-          deserialize(data: StackData, params: any = {}) {
-              params = {
-                  ...params,
-                  stack: new Stack(data.count, data.itemId)
-              };
+          loadData(data: StackData) {
+              this.stack = new Stack(data.count, data.itemId);
 
-              super.deserialize(data, params);
+              super.loadData(data);
+
+              const item = Item.get(this.stack.itemId);
+
+              if (!!item) {
+                  this.copy.tex = item.texture;
+                  this.copy.currentFrame = item.frame;
+              }
           }
       }
   - name: debug
@@ -1961,7 +2170,7 @@ scripts:
           humidityNoiseMap: NoiseMap;
           detailNoiseMap: NoiseMap;
 
-          entities: Set<BasicCopy> = new Set();
+          copies: Set<BasicCopy> = new Set();
 
           private dirtyLight = true;
 
@@ -2292,6 +2501,8 @@ scripts:
           }
 
           update() {
+              this.updateChunkVisibility();
+
               if (this.dirtyLight) {
                   this.recalculateLight();
                   this.dirtyLight = false;
@@ -2377,10 +2588,6 @@ scripts:
               }
 
               if (!bestBiome) {
-                  console.log(worldPosition);
-                  console.log(layer);
-                  console.log(biomes);
-
                   throw new Error("No biomes registered");
               }
 
@@ -2574,7 +2781,6 @@ scripts:
           private generateChunk(chunkPosition: ChunkPosition): Chunk {
               const blocks = new Uint8Array(CHUNK_SIZE * CHUNK_SIZE);
               const backgroundBlocks = new Uint8Array(CHUNK_SIZE * CHUNK_SIZE);
-              console.log(chunkPosition);
 
               for (let x = 0; x < CHUNK_SIZE; x++) {
                   for (let y = 0; y < CHUNK_SIZE; y++) {
@@ -2604,7 +2810,8 @@ scripts:
               });
           }
 
-          updateChunkVisibility(cameraBounds: Rectangle) {
+          updateChunkVisibility() {
+              const cameraBounds = camera.getBounds();
               const chunkWorldSize = CHUNK_SIZE * BLOCK_SIZE;
 
               const startX = Math.floor((cameraBounds.x - this.x) / chunkWorldSize);
@@ -2617,8 +2824,7 @@ scripts:
                   !Number.isFinite(endX) ||
                   !Number.isFinite(startY) ||
                   !Number.isFinite(endY)) {
-                  console.error("Chunk bounds invalid", { startX, endX, startY, endY });
-                  return;
+                  throw new Error(`Chunk bounds invalid: ${startX},${endX} ${startY},${endY}`)
               }
 
               const newVisible = new Set<string>();
@@ -2783,9 +2989,11 @@ scripts:
 
               const entities = [];
 
-              for (const copy of this.entities) {
+              for (const copy of this.copies) {
 
-                  if (!copy.serialize) continue;
+                  if (!copy.entity) {
+
+                  };
 
                   const worldPosition = this.positionFromPoint({ x: copy.x, y: copy.y });
                   const entityChunkPosition = Chunk.positionFromWorldPosition(worldPosition);
@@ -2794,12 +3002,13 @@ scripts:
                       entityChunkPosition.x === chunkPosition.x
                       && entityChunkPosition.y === chunkPosition.y
                   ) {
-                      entities.push(copy.serialize());
+                      logger.debug(LogGroups.SYSTEM, `serializing ${copy.template}`);
+                      entities.push(copy.entity.serialize());
                       copy.kill = true;
                   }
               }
 
-              chunk.entities = entities;
+              chunk.serializedEntities = entities;
 
               chunk.destroyPhysics(this);
               chunk.destroyBackground();
@@ -2892,10 +3101,13 @@ scripts:
               chunk.dirtyLighting = true;
               this.dirtyLight = true;
 
-              if (chunk.entities) {
-                  for (const entity of chunk.entities) {
-                      const entityType = Entity.get(entity.template);
-                      entityType.deserialize(entity);
+              if (chunk.serializedEntities) {
+                  for (const data of chunk.serializedEntities) {
+                      const entityType = Entity.get(data.template);
+                      const entity = new entityType(data.x, data.y);
+
+                      logger.debug(LogGroups.SYSTEM, `loading ${entity.getCopy().template}`);
+                      entity.loadData(data);
                   }
               }
 
@@ -3005,7 +3217,6 @@ scripts:
 
           damageBlockByPosition(worldPosition: WorldPosition, amount: number) {
               const chunkPosition = Chunk.positionFromWorldPosition(worldPosition);
-              console.log(worldPosition)
 
               let chunk = this.chunkManager.get(chunkPosition);
 
@@ -3109,12 +3320,20 @@ scripts:
       }
   - name: globals
     code: |-
+      const logger = new Logger();
+
       let isDebugMode: boolean = false;
       let world: World;
 
-      let gameEvents = {
-          playerSpawned: new Event<BasicCopy>()
+      const gameEvents = {
+          // playerSpawned: new Event<PlayerEntity>()
       }
+
+      Object.keys(gameEvents).forEach((eventName: string) => {
+          gameEvents[eventName].on(
+              (...args: any[]) => logger.info(LogGroups.EVENTS, eventName, args)
+          )
+      })
 assets:
   - type: folder
     uid: M43dcc8Fnb5Dhc
@@ -4609,7 +4828,7 @@ assets:
           matterGravity:
             - 0
             - 0
-        lastmod: 1773457604380
+        lastmod: 1773768376880
         events:
           - eventKey: OnRoomStart
             code: >-
@@ -4618,9 +4837,10 @@ assets:
               world = new World(this.matterEngine);
 
 
-              this.blendMode = PIXI.BLEND_MODES.MULTIPLY;
+              scripts.CameraSetup();
 
-              // this.
+
+              this.blendMode = PIXI.BLEND_MODES.MULTIPLY;
 
               this.chunkBorders = world.drawChunkBorders(this);
 
@@ -4629,11 +4849,12 @@ assets:
               world.getBiomeVerticalBounds(BiomeLayer.Surface, 0);
 
 
-              const { x, y } = world.pointFromPosition({x: 0, y:
+              const playerPoint = world.pointFromPosition({x: 0, y:
               surfaceBounds.top - 1})
 
 
-              this.player = templates.copy('player', x, y);
+              this.player = templates.copy('player', playerPoint.x,
+              playerPoint.y);
 
 
               this.debugGraphics = new PIXI.Graphics();
@@ -4644,6 +4865,7 @@ assets:
           - eventKey: OnStep
             code: |-
               scripts.CameraUpdate();
+              world.update();
 
               this.debugGraphics.clear();
               this.chunkBorders.clear()
@@ -5438,7 +5660,7 @@ assets:
           lightOpacity: false
           lightScale: 0
           cursorpointer: false
-        lastmod: 1773526296223
+        lastmod: 1773771321500
         uid: HbdjfWPTmMR79j
         behaviors:
           - pd8grnPh27DHL7
@@ -5599,25 +5821,33 @@ assets:
             events:
               - eventKey: OnCreate
                 code: |-
-                  const entityType = Entity.get(this.template);
+                  world.copies.add(this);
 
-                  if(!entityType) {
-                      console.log(`Failed to find '${this.template}' as an entity type.`);
-                      return;
+                  if (this.firstCreate) {
+                      this.entity.onCreate();
                   }
-
-                  world.entities.add(this);
-
-                  this.serialize = () => entityType.serialize(this);
                 arguments: {}
                 lib: core
               - eventKey: OnDestroy
-                code: world.entities.delete(this);
+                code: |-
+                  world.copies.delete(this);
+
+                  if (this.isDestroying) {
+                      this.entity.onDestroy();
+                  }
+                arguments: {}
+                lib: core
+              - eventKey: OnStep
+                code: this.entity.onFrameStart();
+                arguments: {}
+                lib: core
+              - eventKey: OnDraw
+                code: this.entity.onFrameEnd();
                 arguments: {}
                 lib: core
             specification: []
-            extendTypes: ''
-            lastmod: 1772776199619
+            extendTypes: 'entity: Entity;'
+            lastmod: 1773771321528
             uid: 43WdcbDq6wKCpn
       - type: template
         baseClass: AnimatedSprite
@@ -5696,40 +5926,15 @@ assets:
         visible: true
         events:
           - eventKey: OnCreate
-            code: >-
+            code: |-
               this.matterBody.restitution = 0;
-
               Matter.Body.setMass(this.matterBody, 1);
-
               Matter.Body.setInertia(this.matterBody, Infinity);
-
 
               this.matterBody.collisionFilter = {
                   category: CollisionCategory.Entity,
                   mask: CollisionCategory.Block
               }
-
-
-              const item = Item.get(this.stack.itemId);
-
-
-              if (!!item) {
-                  this.tex = item.texture;
-                  this.currentFrame = item.frame;
-              }
-
-
-              if (this.reloading) {
-                  return;
-              }
-
-
-              Matter.Body.setVelocity(this.matterBody, {x: 0.1 - 0.2 *
-              random.range(0, 1), y: 0})
-            arguments: {}
-            lib: core
-          - eventKey: OnStep
-            code: ''
             arguments: {}
             lib: core
         extends:
@@ -5745,7 +5950,7 @@ assets:
           matterFixPivot:
             - 0
             - 0
-        lastmod: 1772775666482
+        lastmod: 1773779363782
         uid: dhGWLDBbjjf2jM
         behaviors:
           - pd8grnPh27DHL7
@@ -6255,45 +6460,29 @@ assets:
       - uid: cP1L6zRbJTKt62
         name: CameraUpdate
         code: |-
-          let maxCameraScale = isDebugMode ? 4 : 1.2;
-
           if (actions.Scroll.pressed && actions.Extra.down) {
               const multiplier = actions.Scroll.value < 0 ? 0.5 : 2;
-              camera.scale.set(u.clamp(0.125, camera.scale.x * multiplier, maxCameraScale));
+              camera.scale.set(u.clamp(
+                  0.125,
+                  camera.scale.x * multiplier,
+                  getMaxCameraScale()));
           }
 
           if (actions.DebugToggle.pressed) {
               isDebugMode = !isDebugMode;
           }
-
-          if (isDebugMode && actions.Primary.pressed) {
-              const worldPosition = world.positionFromPoint(pointer);
-
-              world.addLightSource(worldPosition, 15);
-          }
-
-          world.updateChunkVisibility(camera.getBounds());
-          world.update();
         language: typescript
         variables: []
         runAutomatically: false
-        lastmod: 1773526299589
+        lastmod: 1773768352407
         type: script
       - uid: cmGtf6w9P2pNDN
         name: CameraSetup
-        code: camera.scale.set(0.5);
-        language: typescript
-        variables: []
-        runAutomatically: true
-        lastmod: 1772776320818
-        type: script
-      - uid: qz34mdfmLPmqRf
-        name: SpawnPlayer
-        code: ''
+        code: camera.scale.set(0.25);
         language: typescript
         variables: []
         runAutomatically: false
-        lastmod: 1773526302036
+        lastmod: 1773768395774
         type: script
 globalVars: []
 settings:
